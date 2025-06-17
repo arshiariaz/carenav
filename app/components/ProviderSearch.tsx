@@ -1,148 +1,316 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 interface Provider {
-  id: string;
   name: string;
-  type: 'urgent_care' | 'er' | 'primary';
+  type: string;
   address: string;
-  phone: string;
+  negotiatedRate: number;
+  estimatedPatientCost: number;
+  insurancePays: number;
+  costNote: string;
   distance: number;
-  estimatedWait: string;
-  acceptsInsurance: string[];
-  costEstimate: {
-    min: number;
-    max: number;
-  };
+  waitTime: string;
 }
-
-const MOCK_PROVIDERS: Provider[] = [
-  {
-    id: '1',
-    name: 'CityMD Urgent Care',
-    type: 'urgent_care',
-    address: '123 Main St, New York, NY',
-    phone: '(212) 555-0100',
-    distance: 0.5,
-    estimatedWait: '30 min',
-    acceptsInsurance: ['Blue Cross', 'Aetna', 'UnitedHealth'],
-    costEstimate: { min: 75, max: 200 }
-  },
-  {
-    id: '2',
-    name: 'CVS MinuteClinic',
-    type: 'urgent_care',
-    address: '456 Park Ave, New York, NY',
-    phone: '(212) 555-0200',
-    distance: 1.2,
-    estimatedWait: '45 min',
-    acceptsInsurance: ['Blue Cross', 'Cigna', 'Humana'],
-    costEstimate: { min: 65, max: 150 }
-  },
-  {
-    id: '3',
-    name: 'Mount Sinai Emergency Room',
-    type: 'er',
-    address: '789 Hospital Way, New York, NY',
-    phone: '(212) 555-0300',
-    distance: 2.3,
-    estimatedWait: '3-5 hours',
-    acceptsInsurance: ['All major insurance'],
-    costEstimate: { min: 500, max: 3000 }
-  }
-];
 
 interface Props {
   insuranceCompany?: string;
+  matchedPlan?: any;
+  symptom?: string;
+  symptomAnalysis?: any; // Added this prop
 }
 
-export default function ProviderSearch({ insuranceCompany }: Props) {
+export default function ProviderSearch({ 
+  insuranceCompany, 
+  matchedPlan, 
+  symptom = 'office visit',
+  symptomAnalysis // Added this prop
+}: Props) {
   const [selectedType, setSelectedType] = useState<string>('all');
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [stats, setStats] = useState<any>(null);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
-  const filteredProviders = MOCK_PROVIDERS.filter(provider => {
-    if (selectedType !== 'all' && provider.type !== selectedType) {
-      return false;
+  useEffect(() => {
+    if (symptom) { // Only fetch if there's a symptom
+      fetchProviders();
     }
-    if (insuranceCompany && !provider.acceptsInsurance.some(ins =>
-      ins.toLowerCase().includes(insuranceCompany.toLowerCase())
-    )) {
-      return false;
+  }, [selectedType, matchedPlan, symptom, symptomAnalysis]); // Added symptomAnalysis to deps
+
+  async function fetchProviders() {
+    if (!symptom) return; // Don't fetch without a symptom
+    
+    setLoading(true);
+    
+    try {
+      // Use GPT-4 analysis if available, otherwise fall back to basic mapping
+      let cptCodes: string[] = [];
+      let urgency = 'routine';
+      
+      if (symptomAnalysis?.cptCodes) {
+        // Use GPT-4 provided CPT codes
+        cptCodes = symptomAnalysis.cptCodes.map((cpt: any) => cpt.code);
+        urgency = symptomAnalysis.urgency;
+        console.log('🧠 Using GPT-4 analysis:', { cptCodes, urgency });
+      } else {
+        // Fallback to basic mapping
+        if (symptom?.toLowerCase().includes('flu')) {
+          cptCodes = ['99213', '87804'];
+        } else if (symptom?.toLowerCase().includes('throat')) {
+          cptCodes = ['99213', '87880'];
+        } else if (symptom?.toLowerCase().includes('chest')) {
+          cptCodes = ['99284', '71045'];
+        } else {
+          cptCodes = ['99213'];
+        }
+        console.log('🔄 Using fallback CPT mapping:', cptCodes);
+      }
+      
+      const response = await fetch('/api/provider-costs-local', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planId: matchedPlan?.id || 'unknown',
+          symptom,
+          cptCodes, // Pass the array of CPT codes
+          urgency
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        let filtered = data.providers;
+        
+        // Auto-filter by care setting based on GPT-4 urgency
+        if (symptomAnalysis?.urgency === 'emergency') {
+          setSelectedType('er');
+          filtered = filtered.filter((p: Provider) => p.type === 'Emergency Room');
+        } else if (symptomAnalysis?.urgency === 'urgent') {
+          setSelectedType('urgent_care');
+          filtered = filtered.filter((p: Provider) => p.type === 'Urgent Care');
+        } else if (selectedType !== 'all') {
+          // Only apply manual filter if no auto-filter from urgency
+          if (selectedType === 'urgent_care') filtered = filtered.filter((p: Provider) => p.type === 'Urgent Care');
+          if (selectedType === 'er') filtered = filtered.filter((p: Provider) => p.type === 'Emergency Room');
+        }
+        
+        setProviders(filtered);
+        setStats(data.stats);
+      }
+    } catch (error) {
+      console.error('Failed to fetch providers:', error);
+    } finally {
+      setLoading(false);
     }
-    return true;
-  });
+  }
 
   return (
     <div className="mt-8">
       <h2 className="text-2xl font-bold mb-4">Find Care Near You</h2>
+      
+      {matchedPlan?.id?.includes('hsa') && (
+        <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <p className="text-sm text-amber-800">
+            <strong>HSA Plan Note:</strong> You'll pay the full negotiated rate for services 
+            until you meet your ${matchedPlan.deductible?.toLocaleString() || '2,800'} deductible.
+          </p>
+        </div>
+      )}
 
       <div className="flex gap-2 mb-6">
         <button
           onClick={() => setSelectedType('all')}
-          className={`px-4 py-2 rounded ${selectedType === 'all' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+          className={`px-4 py-2 rounded transition-colors ${
+            selectedType === 'all' 
+              ? 'bg-blue-500 text-white' 
+              : 'bg-gray-200 hover:bg-gray-300'
+          }`}
         >
-          All
+          All Providers
         </button>
         <button
           onClick={() => setSelectedType('urgent_care')}
-          className={`px-4 py-2 rounded ${selectedType === 'urgent_care' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+          className={`px-4 py-2 rounded transition-colors ${
+            selectedType === 'urgent_care' 
+              ? 'bg-blue-500 text-white' 
+              : 'bg-gray-200 hover:bg-gray-300'
+          }`}
         >
           Urgent Care
         </button>
         <button
           onClick={() => setSelectedType('er')}
-          className={`px-4 py-2 rounded ${selectedType === 'er' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+          className={`px-4 py-2 rounded transition-colors ${
+            selectedType === 'er' 
+              ? 'bg-blue-500 text-white' 
+              : 'bg-gray-200 hover:bg-gray-300'
+          }`}
         >
           Emergency Room
         </button>
       </div>
 
-      <div className="space-y-4">
-        {filteredProviders.map(provider => (
-          <div key={provider.id} className="border rounded-lg p-6 hover:shadow-lg transition-shadow">
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="text-xl font-semibold">{provider.name}</h3>
-                <p className="text-gray-600">{provider.address}</p>
-                <p className="text-sm text-gray-500 mt-1">
-                  {provider.distance} miles • Wait: {provider.estimatedWait}
-                </p>
-                {insuranceCompany && provider.acceptsInsurance.some(ins =>
-                  ins.toLowerCase().includes(insuranceCompany.toLowerCase())
-                ) && (
-                  <p className="text-green-600 text-sm mt-2">
-                    ✓ Accepts your insurance
-                  </p>
+      {loading ? (
+        <div className="text-center py-8">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Finding providers...</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {stats && (
+            <div className="bg-blue-50 rounded-lg p-4 mb-4">
+              <p className="text-sm text-blue-900">
+                Found {stats.count} providers • 
+                Costs range from <strong>${stats.min}</strong> to <strong>${stats.max}</strong> 
+                {insuranceCompany && ` with ${insuranceCompany}`}
+              </p>
+            </div>
+          )}
+          
+          {providers.map((provider: any, idx) => (
+            <div key={idx} className="border rounded-lg p-6 hover:shadow-lg transition-shadow">
+              <div className="flex justify-between items-start">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xl font-semibold">{provider.name}</h3>
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      provider.type === 'Emergency Room' 
+                        ? 'bg-red-100 text-red-700'
+                        : provider.type === 'Urgent Care'
+                        ? 'bg-orange-100 text-orange-700'
+                        : 'bg-blue-100 text-blue-700'
+                    }`}>
+                      {provider.type}
+                    </span>
+                    {provider.priceLevel === 'low' && (
+                      <span className="px-2 py-1 text-xs rounded-full bg-green-100 text-green-700">
+                        Lower Cost
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-gray-600">{provider.address}</p>
+                  <div className="mt-2 flex items-center gap-4 text-sm text-gray-500">
+                    <span>📍 {provider.distance} miles</span>
+                    <span>⏱️ Wait: {provider.waitTime}</span>
+                    {provider.hours && <span>🕐 {provider.hours}</span>}
+                  </div>
+                  
+                  {insuranceCompany && (
+                    <p className="text-green-600 text-sm mt-2">
+                      ✓ Accepts {insuranceCompany}
+                    </p>
+                  )}
+                  
+                  {provider.hasPharmacy && (
+                    <p className="text-blue-600 text-sm mt-1">
+                      💊 On-site pharmacy
+                    </p>
+                  )}
+                </div>
+
+                <div className="text-right ml-4">
+                  <div className="mb-2">
+                    <p className="text-3xl font-bold text-gray-900">
+                      ${provider.estimatedPatientCost}
+                    </p>
+                    <p className="text-xs text-gray-500">{provider.costNote}</p>
+                  </div>
+                  
+                  {provider.totalCost && (
+                    <div className="text-sm text-gray-600 border-t pt-2">
+                      <p>Total bill: ${provider.totalCost}</p>
+                      <p className="text-green-600">Insurance pays: ${provider.insurancePays}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Cost breakdown button */}
+              {provider.costBreakdown && (
+                <div className="mt-3">
+                  <button
+                    onClick={() => setExpandedIdx(expandedIdx === idx ? null : idx)}
+                    className="text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1"
+                  >
+                    {expandedIdx === idx ? '▼' : '▶'} See cost breakdown
+                  </button>
+                  
+                  {expandedIdx === idx && (
+                    <div className="mt-3 p-4 bg-gray-50 rounded-lg text-sm">
+                      <div className="font-semibold mb-3 text-gray-900">
+                        {provider.bundleName}
+                      </div>
+                      
+                      {provider.costBreakdown.map((category: any, catIdx: number) => (
+                        <div key={catIdx} className="mb-3">
+                          <div className="font-medium text-gray-700 mb-1">
+                            {category.category}
+                          </div>
+                          {category.items.map((item: any, itemIdx: number) => (
+                            <div key={itemIdx} className="flex justify-between py-1 text-gray-600">
+                              <span className="flex-1 pr-2">{item.description}</span>
+                              <span className="text-gray-500">${item.cost}</span>
+                              <span className="font-medium text-gray-900 ml-4 min-w-[60px] text-right">
+                                ${item.patientPays}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                      
+                      <div className="border-t pt-2 mt-3">
+                        <div className="flex justify-between font-semibold">
+                          <span>Total Cost:</span>
+                          <span>${provider.totalCost}</span>
+                        </div>
+                        <div className="flex justify-between text-green-600">
+                          <span>Insurance Pays:</span>
+                          <span>-${provider.insurancePays}</span>
+                        </div>
+                        <div className="flex justify-between font-bold text-lg mt-1">
+                          <span>You Pay:</span>
+                          <span>${provider.estimatedPatientCost}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-4 flex gap-3">
+                <a
+                  href={`tel:${provider.phone || '1-800-DOCTORS'}`}
+                  className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors"
+                >
+                  📞 Call Now
+                </a>
+                <a
+                  href={`https://maps.google.com/?q=${encodeURIComponent(provider.address)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="border border-blue-500 text-blue-500 px-4 py-2 rounded hover:bg-blue-50 transition-colors"
+                >
+                  🗺️ Get Directions
+                </a>
+                {provider.acceptsWalkIns && (
+                  <span className="border border-gray-300 text-gray-600 px-4 py-2 rounded">
+                    👟 Walk-ins OK
+                  </span>
                 )}
               </div>
-
-              <div className="text-right">
-                <p className="text-2xl font-bold">
-                  ${provider.costEstimate.min}-${provider.costEstimate.max}
-                </p>
-                <p className="text-sm text-gray-500">Estimated cost</p>
-              </div>
             </div>
-
-            <div className="mt-4 flex gap-3">
-              <a
-                href={`tel:${provider.phone}`}
-                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-              >
-                Call Now
-              </a>
-              <a
-                href={`https://maps.google.com/?q=${encodeURIComponent(provider.address)}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="border border-blue-500 text-blue-500 px-4 py-2 rounded hover:bg-blue-50"
-              >
-                Get Directions
-              </a>
+          ))}
+          
+          {providers.length === 0 && (
+            <div className="text-center py-8 text-gray-500">
+              No providers found. Try changing your filters.
             </div>
-          </div>
-        ))}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

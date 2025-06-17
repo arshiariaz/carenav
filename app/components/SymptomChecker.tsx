@@ -2,122 +2,191 @@
 
 import { useState } from 'react';
 
-interface SymptomResult {
-  urgency: 'emergency' | 'urgent' | 'primary' | 'self_care';
-  suggestedCare: string;
-  estimatedCosts: {
-    type: string;
-    cost: { min: number; max: number };
-  }[];
-  message: string;
+interface Props {
+  insurancePlan?: any;
+  onSymptomSearch?: (symptom: string, analysis?: SymptomAnalysis) => void;
 }
 
-const SYMPTOM_MAPPINGS: Record<string, SymptomResult> = {
-  'chest pain': {
-    urgency: 'emergency',
-    suggestedCare: 'Emergency Room',
-    estimatedCosts: [
-      { type: 'ER Visit', cost: { min: 1000, max: 5000 } },
-      { type: 'EKG', cost: { min: 200, max: 500 } }
-    ],
-    message: 'Chest pain can be serious. If severe, call 911 immediately.'
-  },
-  'flu symptoms': {
-    urgency: 'urgent',
-    suggestedCare: 'Urgent Care',
-    estimatedCosts: [
-      { type: 'Office Visit', cost: { min: 75, max: 200 } },
-      { type: 'Flu Test', cost: { min: 25, max: 50 } }
-    ],
-    message: 'Flu symptoms can be treated at urgent care. Rest and fluids help.'
-  },
-  'sore throat': {
-    urgency: 'primary',
-    suggestedCare: 'Primary Care or Urgent Care',
-    estimatedCosts: [
-      { type: 'Office Visit', cost: { min: 65, max: 150 } },
-      { type: 'Strep Test', cost: { min: 20, max: 40 } }
-    ],
-    message: 'Most sore throats resolve on their own. See a doctor if it persists.'
-  }
-};
+interface SymptomAnalysis {
+  urgency: 'emergency' | 'urgent' | 'routine' | 'self_care';
+  careSettings: string[];
+  cptCodes: Array<{
+    code: string;
+    description: string;
+    probability?: number;
+  }>;
+  reasoning: string;
+  redFlags: string[];
+  estimatedDuration: string;
+}
 
-export default function SymptomChecker() {
+export default function SymptomChecker({ insurancePlan, onSymptomSearch }: Props) {
   const [symptom, setSymptom] = useState('');
-  const [result, setResult] = useState<SymptomResult | null>(null);
+  const [analysis, setAnalysis] = useState<SymptomAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const checkSymptom = () => {
-    const lowerSymptom = symptom.toLowerCase();
+  const analyzeSymptom = async () => {
+    if (!symptom.trim()) return;
     
-    // Find matching symptom
-    const matchedSymptom = Object.keys(SYMPTOM_MAPPINGS).find(key => 
-      lowerSymptom.includes(key)
-    );
+    setLoading(true);
+    setError('');
     
-    if (matchedSymptom) {
-      setResult(SYMPTOM_MAPPINGS[matchedSymptom]);
-    } else {
-      // Default response
-      setResult({
-        urgency: 'primary',
-        suggestedCare: 'Primary Care',
-        estimatedCosts: [
-          { type: 'Office Visit', cost: { min: 100, max: 250 } }
-        ],
-        message: 'For general symptoms, start with your primary care doctor.'
+    try {
+      const response = await fetch('/api/symptom-triage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symptom })
       });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setAnalysis(data.analysis);
+        // Pass both symptom AND analysis to provider search
+        onSymptomSearch?.(symptom, data.analysis);
+      } else {
+        setError('Unable to analyze symptoms');
+      }
+    } catch (err) {
+      setError('Analysis failed');
+      console.error('Symptom analysis error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getUrgencyColor = (urgency: string) => {
+    switch (urgency) {
+      case 'emergency': return 'border-red-500 bg-red-50';
+      case 'urgent': return 'border-orange-500 bg-orange-50';
+      case 'routine': return 'border-blue-500 bg-blue-50';
+      case 'self_care': return 'border-green-500 bg-green-50';
+      default: return 'border-gray-300 bg-gray-50';
+    }
+  };
+
+  const getUrgencyIcon = (urgency: string) => {
+    switch (urgency) {
+      case 'emergency': return '🚨';
+      case 'urgent': return '⚠️';
+      case 'routine': return 'ℹ️';
+      case 'self_care': return '✅';
+      default: return '❓';
     }
   };
 
   return (
-    <div className="mt-8 p-6 bg-gray-50 rounded-lg">
+    <div className="mt-8">
       <h2 className="text-2xl font-bold mb-4">Check Your Symptoms</h2>
       
-      <div className="flex gap-2">
+      <div className="flex gap-2 mb-4">
         <input
           type="text"
           value={symptom}
           onChange={(e) => setSymptom(e.target.value)}
-          placeholder="Describe your symptoms (e.g., 'sore throat', 'chest pain')"
-          className="flex-1 px-4 py-2 border rounded-lg"
-          onKeyPress={(e) => e.key === 'Enter' && checkSymptom()}
+          onKeyPress={(e) => e.key === 'Enter' && analyzeSymptom()}
+          placeholder="Describe your symptoms (e.g., 'sore throat and fever for 2 days')"
+          className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
         />
         <button
-          onClick={checkSymptom}
-          className="bg-blue-500 text-white px-6 py-2 rounded-lg hover:bg-blue-600"
+          onClick={analyzeSymptom}
+          disabled={loading || !symptom.trim()}
+          className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 transition-colors"
         >
-          Check
+          {loading ? (
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+              Analyzing...
+            </div>
+          ) : (
+            'Check'
+          )}
         </button>
       </div>
 
-      {result && (
-        <div className="mt-6 p-4 bg-white rounded-lg border">
-          <div className={`inline-block px-3 py-1 rounded-full text-sm font-semibold mb-3
-            ${result.urgency === 'emergency' ? 'bg-red-100 text-red-800' : ''}
-            ${result.urgency === 'urgent' ? 'bg-orange-100 text-orange-800' : ''}
-            ${result.urgency === 'primary' ? 'bg-blue-100 text-blue-800' : ''}
-          `}>
-            {result.urgency.toUpperCase()}
-          </div>
-          
-          <h3 className="font-semibold text-lg">
-            Suggested: {result.suggestedCare}
-          </h3>
-          
-          <p className="text-gray-600 mt-2">{result.message}</p>
-          
-          <div className="mt-4">
-            <p className="font-semibold mb-2">Estimated Costs:</p>
-            {result.estimatedCosts.map((cost, i) => (
-              <div key={i} className="flex justify-between text-sm">
-                <span>{cost.type}:</span>
-                <span>${cost.cost.min}-${cost.cost.max}</span>
+      {error && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+          <p className="text-red-700">{error}</p>
+        </div>
+      )}
+
+      {analysis && (
+        <div className={`border-2 rounded-lg p-6 ${getUrgencyColor(analysis.urgency)}`}>
+          <div className="flex items-start gap-3 mb-4">
+            <span className="text-2xl">{getUrgencyIcon(analysis.urgency)}</span>
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="font-semibold text-lg uppercase tracking-wide">
+                  {analysis.urgency.replace('_', ' ')}
+                </span>
+                {analysis.urgency === 'emergency' && (
+                  <span className="bg-red-500 text-white px-2 py-1 rounded text-xs font-bold">
+                    CALL 911
+                  </span>
+                )}
               </div>
-            ))}
+              
+              <p className="text-sm mb-3">
+                <strong>Suggested:</strong> {analysis.careSettings.join(' or ')}
+              </p>
+              
+              <p className="text-sm text-gray-700 mb-4">
+                {analysis.reasoning}
+              </p>
+
+              {analysis.urgency === 'emergency' && (
+                <div className="bg-red-100 border border-red-300 rounded p-3 mb-4">
+                  <p className="text-red-800 font-semibold text-sm">
+                    ⚠️ This may require immediate medical attention. If symptoms are severe, call 911.
+                  </p>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="font-semibold mb-2">Estimated Costs:</p>
+                  {analysis.cptCodes.map((cpt, idx) => (
+                    <div key={idx} className="flex justify-between">
+                      <span>{cpt.description}:</span>
+                      <span className="font-medium">
+                        {analysis.urgency === 'emergency' ? '$500-$2000' :
+                         analysis.urgency === 'urgent' ? '$100-$400' : '$50-$200'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                
+                <div>
+                  <p className="font-semibold mb-2">Expected Timeline:</p>
+                  <p>{analysis.estimatedDuration}</p>
+                  
+                  {analysis.redFlags.length > 0 && (
+                    <div className="mt-3">
+                      <p className="font-semibold text-red-700 mb-1">⚠️ Seek immediate care if:</p>
+                      <ul className="text-xs text-red-600">
+                        {analysis.redFlags.slice(0, 3).map((flag, idx) => (
+                          <li key={idx}>• {flag}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {analysis.cptCodes.length > 0 && (
+                <div className="mt-4 p-3 bg-gray-100 rounded text-xs">
+                  <p className="font-semibold mb-1">Likely procedures:</p>
+                  <p className="text-gray-600">
+                    {analysis.cptCodes.map(cpt => `${cpt.code} (${cpt.description})`).join(', ')}
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
-      
+
       <p className="text-xs text-gray-500 mt-4">
         This is not medical advice. Always consult with a healthcare professional.
       </p>

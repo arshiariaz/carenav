@@ -1,0 +1,79 @@
+{
+  "reporting_entity_name": "Test Health Plan",
+  "reporting_entity_type": "health insurance issuer",
+  "plan_name": "Test PPO Plan",
+  "plan_id": "12345TX0100100",
+  "plan_market_type": "individual",
+  "in_network": [
+    {
+      "billing_code": "99213",
+      "billing_code_type": "CPT",
+      "billing_code_type_version": "2024",
+      "description": "Office visit, established patient",
+      "negotiated_rates": [
+        {
+          "provider_references": [
+            "PROVIDER_1",
+            "PROVIDER_2"
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_rate": 89,
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "billing_code": "87804",
+      "billing_code_type": "CPT",
+      "description": "Flu test",
+      "negotiated_rates": [
+        {
+          "provider_references": [
+            "PROVIDER_1"
+          ],
+          "negotiated_prices": [
+            {
+              "negotiated_rate": 45,
+              "billing_class": "professional"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "provider_references": [
+    {
+      "provider_reference": "PROVIDER_1",
+      "provider_groups": [
+        {
+          "npi": [
+            "1720087992"
+          ],
+          "tin": {
+            "type": "ein",
+            "value": "12-3456789"
+          },
+          "name": "CVS MINUTECLINIC"
+        }
+      ]
+    },
+    {
+      "provider_reference": "PROVIDER_2",
+      "provider_groups": [
+        {
+          "npi": [
+            "1164420006"
+          ],
+          "tin": {
+            "type": "ein",
+            "value": "98-7654321"
+          },
+          "name": "WALGREENS HEALTHCARE CLINIC"
+        }
+      ]
+    }
+  ]
+}

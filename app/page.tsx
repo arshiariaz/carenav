@@ -1,5 +1,4 @@
 'use client';
-
 import { useState } from 'react';
 import InsuranceCardUpload from './components/InsuranceCardUpload';
 import CostCard from './components/CostCard';
@@ -8,6 +7,19 @@ import SymptomChecker from './components/SymptomChecker';
 
 export default function Home() {
   const [extractedData, setExtractedData] = useState<any>(null);
+  const [matchedPlan, setMatchedPlan] = useState<any>(null);
+  const [lastSymptom, setLastSymptom] = useState<string>('');
+  const [symptomAnalysis, setSymptomAnalysis] = useState<any>(null);
+
+  const handleDataExtracted = (data: any, plan?: any) => {
+    setExtractedData(data);
+    setMatchedPlan(plan);
+  };
+
+  const handleSymptomSearch = (symptom: string, analysis?: any) => {
+    setLastSymptom(symptom);
+    setSymptomAnalysis(analysis);
+  };
 
   return (
     <main className="min-h-screen p-8">
@@ -16,10 +28,10 @@ export default function Home() {
         <p className="text-gray-600 mb-8">
           Upload your insurance card to find care you can afford
         </p>
-        
+
         {/* Step 1: Upload Insurance Card */}
-        <InsuranceCardUpload onDataExtracted={setExtractedData} />
-        
+        <InsuranceCardUpload onDataExtracted={handleDataExtracted} />
+
         {/* Step 2: Show Insurance Info & Costs */}
         {extractedData && (
           <>
@@ -29,28 +41,49 @@ export default function Home() {
                 <p><strong>Insurance:</strong> {extractedData.companyName}</p>
                 <p><strong>Member ID:</strong> {extractedData.memberId}</p>
                 <p><strong>Group:</strong> {extractedData.groupNumber}</p>
+                {matchedPlan && (
+                  <p className="text-green-600 mt-2">
+                    ✓ Matched to {matchedPlan.name} plan
+                  </p>
+                )}
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
-              <CostCard 
-                title="Urgent Care Visit" 
-                cost={{ min: 75, max: 200, avg: 125 }} 
+              <CostCard
+                title="Urgent Care Visit"
+                cost={{
+                  min: matchedPlan?.copays?.urgentCare || 75,
+                  max: 200,
+                  avg: matchedPlan?.copays?.urgentCare || 125
+                }}
                 insurance={extractedData.companyName}
               />
-              <CostCard 
-                title="ER Visit" 
-                cost={{ min: 500, max: 3000, avg: 1200 }} 
+              <CostCard
+                title="ER Visit"
+                cost={{
+                  min: matchedPlan?.copays?.emergency || 500,
+                  max: 3000,
+                  avg: matchedPlan?.copays?.emergency || 1200
+                }}
                 insurance={extractedData.companyName}
               />
-              <CostCard 
-                title="Flu Test" 
-                cost={{ min: 25, max: 100, avg: 50 }} 
+              <CostCard
+                title="Primary Care"
+                cost={{
+                  min: matchedPlan?.copays?.primaryCare || 25,
+                  max: 150,
+                  avg: matchedPlan?.copays?.primaryCare || 50
+                }}
                 insurance={extractedData.companyName}
               />
-              <CostCard 
-                title="X-Ray" 
-                cost={{ min: 100, max: 500, avg: 250 }} 
+              <CostCard
+                title="Specialist Visit"
+                cost={{
+                  min: matchedPlan?.copays?.specialist || 50,
+                  max: 300,
+                  avg: matchedPlan?.copays?.specialist || 150
+                }}
                 insurance={extractedData.companyName}
               />
             </div>
@@ -58,10 +91,18 @@ export default function Home() {
         )}
 
         {/* Step 3: Symptom Checker */}
-        <SymptomChecker />
+        <SymptomChecker
+          insurancePlan={matchedPlan}
+          onSymptomSearch={handleSymptomSearch}
+        />
 
         {/* Step 4: Find Providers */}
-        <ProviderSearch insuranceCompany={extractedData?.companyName} />
+        <ProviderSearch
+          insuranceCompany={extractedData?.companyName}
+          matchedPlan={matchedPlan}
+          symptom={lastSymptom}
+          symptomAnalysis={symptomAnalysis}
+        />
       </div>
     </main>
   );
