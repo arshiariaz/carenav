@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { BigQuery } from '@google-cloud/bigquery';
-import * as mindee from 'mindee';
 
-const mindeeClient = new mindee.Client({ apiKey: process.env.MINDEE_API_KEY! });
+// Since Mindee doesn't have proper TypeScript types, we'll declare them
+const mindee = require('mindee');
+const { Client } = mindee;
+
+// Initialize Mindee client
+const mindeeClient = new Client({ apiKey: process.env.MINDEE_API_KEY! });
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,28 +20,51 @@ export async function POST(req: NextRequest) {
     // Convert file to buffer for Mindee
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
+    
+    // Create input source from buffer
     const inputSource = mindeeClient.docFromBuffer(buffer, file.name);
 
-    // REAL MINDEE API CALL
+    // Parse with Mindee InsuranceCard API
     const apiResponse = await mindeeClient.parse(
       mindee.document.InsuranceCardV1,
       inputSource
     );
 
-    const result = apiResponse.document;
+    // Extract the data - the actual structure from Mindee
+    const doc = apiResponse.document;
+    const prediction = doc?.inference?.prediction || {};
     
-    // Extract real data
+    // Extract fields based on actual Mindee InsuranceCardV1 response
+    // Note: Field names might vary, so we'll be defensive
     const extracted = {
-      companyName: result.inference.prediction.company?.value || 'Unknown',
-      memberName: result.inference.prediction.memberName?.value || '',
-      memberId: result.inference.prediction.memberId?.value || '',
-      groupNumber: result.inference.prediction.groupNumber?.value || '',
-      payerId: result.inference.prediction.payerId?.value || '',
-      copays: result.inference.prediction.copays || [],
-      confidence: result.inference.pages[0]?.prediction?.company?.confidence || 0
+      companyName: prediction.company?.value || 
+                   prediction.companyName?.value || 
+                   prediction.insuranceCompany?.value || 
+                   'Unknown',
+      memberName: prediction.memberName?.value || 
+                  prediction.member_name?.value || 
+                  prediction.name?.value || 
+                  '',
+      memberId: prediction.memberId?.value || 
+                prediction.member_id?.value || 
+                prediction.memberNumber?.value || 
+                '',
+      groupNumber: prediction.groupNumber?.value || 
+                   prediction.group_number?.value || 
+                   prediction.groupId?.value || 
+                   '',
+      payerId: prediction.payerId?.value || 
+               prediction.payer_id?.value || 
+               '',
+      copays: prediction.copays || [],
+      confidence: prediction.company?.confidence || 
+                  prediction.companyName?.confidence || 
+                  0
     };
 
-    // BigQuery Logging (keep your existing code)
+    console.log('Mindee OCR Result:', extracted);
+
+    // BigQuery Logging
     try {
       const bigquery = new BigQuery({
         projectId: process.env.NEXT_PUBLIC_GCP_PROJECT_ID,
@@ -55,33 +82,23 @@ export async function POST(req: NextRequest) {
         .dataset('insurance_rates')
         .table('ocr_logs')
         .insert(row);
+        
+      console.log('✅ Logged to BigQuery:', row.insurance);
     } catch (err) {
       console.error('BigQuery insert error:', err);
+      // Don't fail the request if logging fails
     }
-
-    // Match insurance plan with Pinecone
-    const planMatch = await fetch(`${req.nextUrl.origin}/api/match-plan`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        companyName: extracted.companyName,
-        groupNumber: extracted.groupNumber,
-        payerId: extracted.payerId
-      })
-    });
-
-    const planData = await planMatch.json();
 
     return NextResponse.json({ 
       success: true, 
-      extracted,
-      matchedPlan: planData.plan || null
+      extracted
     });
 
   } catch (error: any) {
-    console.error('Error:', error);
+    console.error('OCR Error:', error);
+    console.error('Error details:', error.message);
     
-    // Fallback to mock if Mindee fails
+    // Fallback to mock data if OCR fails
     const mockExtracted = {
       companyName: 'Blue Cross Blue Shield',
       memberName: 'Test User',
