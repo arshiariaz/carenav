@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { BigQuery } from '@google-cloud/bigquery';
+import * as mindee from 'mindee';
+
+const mindeeClient = new mindee.Client({ apiKey: process.env.MINDEE_API_KEY! });
 
 export async function POST(req: NextRequest) {
   try {
@@ -10,21 +13,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    // Mock data for testing (since we don't have Mindee API key yet)
-    const mockExtracted = {
-      companyName: 'Blue Cross Blue Shield',
-      memberName: 'Test User',
-      memberId: 'ABC123456789',
-      groupNumber: 'GRP-001',
-      payerId: 'BCBS',
-      copays: [],
-      confidence: 0.95
+    // Convert file to buffer for Mindee
+    const bytes = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
+    const inputSource = mindeeClient.docFromBuffer(buffer, file.name);
+
+    // REAL MINDEE API CALL
+    const apiResponse = await mindeeClient.parse(
+      mindee.document.InsuranceCardV1,
+      inputSource
+    );
+
+    const result = apiResponse.document;
+    
+    // Extract real data
+    const extracted = {
+      companyName: result.inference.prediction.company?.value || 'Unknown',
+      memberName: result.inference.prediction.memberName?.value || '',
+      memberId: result.inference.prediction.memberId?.value || '',
+      groupNumber: result.inference.prediction.groupNumber?.value || '',
+      payerId: result.inference.prediction.payerId?.value || '',
+      copays: result.inference.prediction.copays || [],
+      confidence: result.inference.pages[0]?.prediction?.company?.confidence || 0
     };
 
-    // Simulate processing time
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // ✅ BigQuery Logging
+    // BigQuery Logging (keep your existing code)
     try {
       const bigquery = new BigQuery({
         projectId: process.env.NEXT_PUBLIC_GCP_PROJECT_ID,
@@ -32,10 +45,10 @@ export async function POST(req: NextRequest) {
 
       const row = {
         timestamp: new Date().toISOString(),
-        insurance: mockExtracted.companyName,
-        member_id: mockExtracted.memberId,
-        group: mockExtracted.groupNumber,
-        confidence: mockExtracted.confidence,
+        insurance: extracted.companyName,
+        member_id: extracted.memberId,
+        group: extracted.groupNumber,
+        confidence: extracted.confidence,
       };
 
       await bigquery
@@ -46,16 +59,43 @@ export async function POST(req: NextRequest) {
       console.error('BigQuery insert error:', err);
     }
 
+    // Match insurance plan with Pinecone
+    const planMatch = await fetch(`${req.nextUrl.origin}/api/match-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        companyName: extracted.companyName,
+        groupNumber: extracted.groupNumber,
+        payerId: extracted.payerId
+      })
+    });
+
+    const planData = await planMatch.json();
+
     return NextResponse.json({ 
       success: true, 
-      extracted: mockExtracted 
+      extracted,
+      matchedPlan: planData.plan || null
     });
 
   } catch (error: any) {
     console.error('Error:', error);
-    return NextResponse.json(
-      { error: 'Failed to process insurance card' }, 
-      { status: 500 }
-    );
+    
+    // Fallback to mock if Mindee fails
+    const mockExtracted = {
+      companyName: 'Blue Cross Blue Shield',
+      memberName: 'Test User',
+      memberId: 'ABC123456789',
+      groupNumber: 'GRP-001',
+      payerId: 'BCBS',
+      copays: [],
+      confidence: 0.95
+    };
+
+    return NextResponse.json({ 
+      success: false,
+      error: 'OCR processing failed, using mock data',
+      extracted: mockExtracted 
+    });
   }
 }
