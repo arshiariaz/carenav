@@ -1,21 +1,14 @@
 // app/api/provider-costs-local/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { getBundleForSymptom, calculateBundleCost } from '@/lib/procedure-bundles';
-import * as fs from 'fs';
-import * as path from 'path';
 
-interface ParsedRate {
+// Add this interface for BigQuery response
+interface BigQueryRate {
   billing_code: string;
-  billing_code_type: string;
-  provider_name: string;
-  provider_npi: string;
-  provider_tin: string;
-  negotiated_rate: number;
-  billing_class: string;
-  plan_name: string;
-  plan_id: string;
-  reporting_entity: string;
-  file_source: string;
+  sample_size: number;
+  average_rate: number;
+  min_rate: number;
+  max_rate: number;
 }
 
 // Provider-specific price multipliers (from original API)
@@ -113,23 +106,31 @@ const PROVIDERS: Record<string, any> = {
   ]
 };
 
-// Load parsed rates from local file
-function loadParsedRates(): ParsedRate[] {
+// New function to get real rates from BigQuery via Cloud Function
+async function getRealRatesFromBigQuery(cptCodes: string[]): Promise<Map<string, BigQueryRate> | null> {
   try {
-    const filePath = path.join(process.cwd(), 'data', 'parsed-rates.json');
-    if (!fs.existsSync(filePath)) {
-      console.log('⚠️  parsed-rates.json not found');
-      return [];
-    }
+    console.log('🔍 Fetching real rates from BigQuery for CPT codes:', cptCodes);
     
-    const fileContent = fs.readFileSync(filePath, 'utf-8');
-    const rates = JSON.parse(fileContent);
-    console.log(`📊 Loaded ${rates.length} MRF rates`);
-    return rates;
+    const response = await fetch('https://us-central1-carenav-health.cloudfunctions.net/get-mrf-rates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cpt_codes: cptCodes })
+    });
+    
+    const data = await response.json();
+    
+    if (data.success && data.rates) {
+      const rateMap = new Map<string, BigQueryRate>();
+      data.rates.forEach((rate: BigQueryRate) => {
+        rateMap.set(rate.billing_code, rate);
+      });
+      console.log('✅ Got real rates for', rateMap.size, 'CPT codes');
+      return rateMap;
+    }
   } catch (error) {
-    console.error('❌ Error loading parsed rates:', error);
-    return [];
+    console.error('❌ Failed to get real rates from BigQuery:', error);
   }
+  return null;
 }
 
 export async function POST(request: NextRequest) {
@@ -147,9 +148,6 @@ export async function POST(request: NextRequest) {
         message: 'Could not determine appropriate care for this symptom'
       }, { status: 400 });
     }
-    
-    // Load real MRF rates
-    const allRates = loadParsedRates();
     
     // Determine provider type based on bundle
     let providerType = 'urgent_care';
@@ -188,92 +186,47 @@ export async function POST(request: NextRequest) {
       console.log('🔄 Using bundle CPT codes:', bundleCptCodes);
     }
     
-    // Find real rates for these CPT codes
-    const mrfRateMap = new Map<string, number>();
-    allRates.forEach(rate => {
-      if (bundleCptCodes.includes(rate.billing_code)) {
-        const key = `${rate.provider_name}_${rate.billing_code}`;
-        mrfRateMap.set(key, rate.negotiated_rate);
-      }
-    });
-    
-    console.log(`💰 Found ${mrfRateMap.size} real MRF rates for CPT codes: ${bundleCptCodes.join(', ')}`);
+    // Get real rates from BigQuery
+    const realRates = await getRealRatesFromBigQuery(bundleCptCodes);
     
     // Calculate costs for each provider
     const providers = availableProviders.map((provider: any) => {
       const multiplier = PROVIDER_MULTIPLIERS[provider.name] || 1.0;
+      const bundleCopy = JSON.parse(JSON.stringify(bundle));
       
-      // Check if we have real rates for this provider
-      const hasRealRates = bundleCptCodes.some(cpt => 
-        mrfRateMap.has(`${provider.name}_${cpt}`) ||
-        mrfRateMap.has(`CVS MINUTECLINIC_${cpt}`) ||
-        mrfRateMap.has(`WALGREENS HEALTHCARE CLINIC_${cpt}`)
-      );
-      
-      if (hasRealRates && allRates.length > 0) {
-        // Use real MRF rates
-        const bundleCopy = JSON.parse(JSON.stringify(bundle));
-        bundleCopy.components.forEach((component: any) => {
-          // Try to find real rate for this provider + CPT code
-          let realRate = mrfRateMap.get(`${provider.name}_${component.code}`);
-          
-          // Fallback to CVS/Walgreens rates if provider not found
-          if (!realRate) {
-            realRate = mrfRateMap.get(`CVS MINUTECLINIC_${component.code}`) ||
-                      mrfRateMap.get(`WALGREENS HEALTHCARE CLINIC_${component.code}`);
-          }
-          
-          if (realRate) {
-            component.typical_cost = realRate;
-          }
-        });
-        
-        const costDetails = calculateBundleCost(bundleCopy, mockPlan);
-        
-        return {
-          ...provider,
-          bundleName: bundle.name,
-          totalCost: costDetails.totalCost,
-          estimatedPatientCost: costDetails.patientCost,
-          insurancePays: costDetails.insurancePays,
-          costBreakdown: costDetails.breakdown,
-          costNote: isHSA ? 
-            'You pay full cost (counts toward $2,800 deductible)' : 
-            'After insurance',
-          priceLevel: 'low', // Real rates are usually better
-          distance: parseFloat((Math.random() * 10 + 0.5).toFixed(1)),
-          waitTime: provider.averageWait || (providerType === 'urgent_care' ? '30-45 min' : '10-15 min'),
-          // UI compatibility fields
-          negotiatedRate: costDetails.totalCost,
-          miles: parseFloat((Math.random() * 10 + 0.5).toFixed(1))
-        };
-      } else {
-        // Fallback to bundle-based calculation with multiplier (like original API)
-        const bundleCopy = JSON.parse(JSON.stringify(bundle));
-        bundleCopy.components.forEach((component: any) => {
+      // Update component costs with real rates or apply multiplier
+      bundleCopy.components.forEach((component: any) => {
+        if (realRates && realRates.has(component.code)) {
+          const rate = realRates.get(component.code)!;
+          // Use average rate adjusted by provider multiplier
+          component.typical_cost = Math.round(rate.average_rate * multiplier);
+        } else {
+          // Fall back to original cost with multiplier
           component.typical_cost = Math.round(component.typical_cost * multiplier);
-        });
-        
-        const costDetails = calculateBundleCost(bundleCopy, mockPlan);
-        
-        return {
-          ...provider,
-          bundleName: bundle.name,
-          totalCost: costDetails.totalCost,
-          estimatedPatientCost: costDetails.patientCost,
-          insurancePays: costDetails.insurancePays,
-          costBreakdown: costDetails.breakdown,
-          costNote: isHSA ? 
-            'You pay full cost (counts toward $2,800 deductible)' : 
-            'After insurance',
-          priceLevel: multiplier < 0.9 ? 'low' : multiplier > 1.1 ? 'high' : 'average',
-          distance: parseFloat((Math.random() * 10 + 0.5).toFixed(1)),
-          waitTime: provider.averageWait || (providerType === 'urgent_care' ? '30-45 min' : '10-15 min'),
-          // UI compatibility fields
-          negotiatedRate: costDetails.totalCost,
-          miles: parseFloat((Math.random() * 10 + 0.5).toFixed(1))
-        };
-      }
+        }
+      });
+      
+      const costDetails = calculateBundleCost(bundleCopy, mockPlan);
+      
+      return {
+        ...provider,
+        bundleName: bundle.name,
+        totalCost: costDetails.totalCost,
+        estimatedPatientCost: costDetails.patientCost,
+        insurancePays: costDetails.insurancePays,
+        costBreakdown: costDetails.breakdown,
+        costNote: isHSA ? 
+          'You pay full cost (counts toward $2,800 deductible)' : 
+          'After insurance',
+        priceLevel: multiplier < 0.9 ? 'low' : multiplier > 1.1 ? 'high' : 'average',
+        distance: parseFloat((Math.random() * 10 + 0.5).toFixed(1)),
+        waitTime: provider.averageWait || (providerType === 'urgent_care' ? '30-45 min' : '10-15 min'),
+        // UI compatibility fields
+        negotiatedRate: costDetails.totalCost,
+        miles: parseFloat((Math.random() * 10 + 0.5).toFixed(1)),
+        // Add flag to show if using real rates
+        usingRealRates: realRates !== null && realRates.size > 0
+      };
     }).sort((a: any, b: any) => a.estimatedPatientCost - b.estimatedPatientCost);
     
     // Calculate statistics
@@ -284,8 +237,8 @@ export async function POST(request: NextRequest) {
       avg: Math.round(patientCosts.reduce((a: number, b: number) => a + b, 0) / patientCosts.length),
       count: providers.length,
       bundleUsed: bundle.name,
-      mrfRatesFound: mrfRateMap.size,
-      totalMrfRates: allRates.length
+      realRatesFound: realRates?.size || 0,
+      cptCodesQueried: bundleCptCodes.length
     };
     
     return NextResponse.json({
@@ -304,7 +257,8 @@ export async function POST(request: NextRequest) {
         deductibleMet: 0,
         message: isHSA ? 
           'With your HSA plan, you pay the full negotiated rate until you meet your deductible.' :
-          'Your plan includes copays for office visits and coinsurance for other services.'
+          'Your plan includes copays for office visits and coinsurance for other services.',
+        usingRealRates: realRates !== null && realRates.size > 0
       }
     });
     
