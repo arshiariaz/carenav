@@ -1,15 +1,25 @@
 // app/api/provider-costs-local/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { getBundleForSymptom, calculateBundleCost } from '@/lib/procedure-bundles';
+import * as fs from 'fs';
+import * as path from 'path';
 
-// Add this interface for BigQuery response
-interface BigQueryRate {
+interface ParsedRate {
   billing_code: string;
-  sample_size: number;
-  average_rate: number;
-  min_rate: number;
-  max_rate: number;
+  billing_code_type: string;
+  provider_name: string;
+  provider_npi: string;
+  provider_tin: string;
+  negotiated_rate: number;
+  billing_class: string;
+  plan_name: string;
+  plan_id: string;
+  reporting_entity: string;
+  file_source: string;
 }
+
+// GCP Cloud Function URL for querying rates
+const GCP_QUERY_RATES_URL = 'https://queryrates-b6yaa4g63q-uc.a.run.app';
 
 // Provider-specific price multipliers (from original API)
 const PROVIDER_MULTIPLIERS: Record<string, number> = {
@@ -106,31 +116,55 @@ const PROVIDERS: Record<string, any> = {
   ]
 };
 
-// New function to get real rates from BigQuery via Cloud Function
-async function getRealRatesFromBigQuery(cptCodes: string[]): Promise<Map<string, BigQueryRate> | null> {
+// Fetch real rates from GCP BigQuery
+async function fetchRealRatesFromGCP(cptCodes: string[], state: string = 'TX'): Promise<Map<string, any>> {
+  const rateMap = new Map<string, any>();
+  
   try {
-    console.log('🔍 Fetching real rates from BigQuery for CPT codes:', cptCodes);
-    
-    const response = await fetch('https://us-central1-carenav-health.cloudfunctions.net/get-mrf-rates', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cpt_codes: cptCodes })
+    // Fetch rates for each CPT code
+    const promises = cptCodes.map(async (cptCode) => {
+      try {
+        const url = new URL(GCP_QUERY_RATES_URL);
+        url.searchParams.append('cptCode', cptCode);
+        url.searchParams.append('state', state);
+        
+        const response = await fetch(url.toString());
+        const data = await response.json();
+        
+        if (data.success && data.data?.[0]) {
+          rateMap.set(cptCode, data.data[0]);
+          console.log(`✅ Got real rate for CPT ${cptCode}: $${data.data[0].min_rate}-$${data.data[0].max_rate}`);
+        }
+      } catch (error) {
+        console.error(`Failed to fetch rate for CPT ${cptCode}:`, error);
+      }
     });
     
-    const data = await response.json();
-    
-    if (data.success && data.rates) {
-      const rateMap = new Map<string, BigQueryRate>();
-      data.rates.forEach((rate: BigQueryRate) => {
-        rateMap.set(rate.billing_code, rate);
-      });
-      console.log('✅ Got real rates for', rateMap.size, 'CPT codes');
-      return rateMap;
-    }
+    await Promise.all(promises);
   } catch (error) {
-    console.error('❌ Failed to get real rates from BigQuery:', error);
+    console.error('Error fetching rates from GCP:', error);
   }
-  return null;
+  
+  return rateMap;
+}
+
+// Load parsed rates from local file (fallback)
+function loadParsedRates(): ParsedRate[] {
+  try {
+    const filePath = path.join(process.cwd(), 'data', 'parsed-rates.json');
+    if (!fs.existsSync(filePath)) {
+      console.log('⚠️  parsed-rates.json not found');
+      return [];
+    }
+    
+    const fileContent = fs.readFileSync(filePath, 'utf-8');
+    const rates = JSON.parse(fileContent);
+    console.log(`📊 Loaded ${rates.length} MRF rates from local file`);
+    return rates;
+  } catch (error) {
+    console.error('❌ Error loading parsed rates:', error);
+    return [];
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -148,6 +182,9 @@ export async function POST(request: NextRequest) {
         message: 'Could not determine appropriate care for this symptom'
       }, { status: 400 });
     }
+    
+    // Try to load local parsed rates first
+    const allRates = loadParsedRates();
     
     // Determine provider type based on bundle
     let providerType = 'urgent_care';
@@ -186,23 +223,53 @@ export async function POST(request: NextRequest) {
       console.log('🔄 Using bundle CPT codes:', bundleCptCodes);
     }
     
-    // Get real rates from BigQuery
-    const realRates = await getRealRatesFromBigQuery(bundleCptCodes);
+    // Fetch real rates from GCP BigQuery
+    const gcpRates = await fetchRealRatesFromGCP(bundleCptCodes, 'TX');
+    const hasGCPRates = gcpRates.size > 0;
+    
+    // Find real rates for these CPT codes from local file
+    const mrfRateMap = new Map<string, number>();
+    allRates.forEach(rate => {
+      if (bundleCptCodes.includes(rate.billing_code)) {
+        const key = `${rate.provider_name}_${rate.billing_code}`;
+        mrfRateMap.set(key, rate.negotiated_rate);
+      }
+    });
+    
+    console.log(`💰 Found ${mrfRateMap.size} local MRF rates, ${gcpRates.size} GCP rates`);
     
     // Calculate costs for each provider
     const providers = availableProviders.map((provider: any) => {
       const multiplier = PROVIDER_MULTIPLIERS[provider.name] || 1.0;
-      const bundleCopy = JSON.parse(JSON.stringify(bundle));
       
-      // Update component costs with real rates or apply multiplier
+      // Use real rates if available
+      const bundleCopy = JSON.parse(JSON.stringify(bundle));
+      let usingRealData = false;
+      
       bundleCopy.components.forEach((component: any) => {
-        if (realRates && realRates.has(component.code)) {
-          const rate = realRates.get(component.code)!;
-          // Use average rate adjusted by provider multiplier
-          component.typical_cost = Math.round(rate.average_rate * multiplier);
+        // First try GCP rates (most reliable)
+        const gcpRate = gcpRates.get(component.code);
+        if (gcpRate) {
+          // Use median rate from GCP with provider multiplier
+          component.typical_cost = Math.round(gcpRate.median_rate * multiplier);
+          usingRealData = true;
         } else {
-          // Fall back to original cost with multiplier
-          component.typical_cost = Math.round(component.typical_cost * multiplier);
+          // Try local MRF rates
+          let realRate = mrfRateMap.get(`${provider.name}_${component.code}`);
+          
+          // Fallback to CVS/Walgreens rates if provider not found
+          if (!realRate) {
+            realRate = mrfRateMap.get(`CVS MINUTECLINIC_${component.code}`) ||
+                      mrfRateMap.get(`WALGREENS HEALTHCARE CLINIC_${component.code}`);
+          }
+          
+          if (realRate) {
+            component.typical_cost = realRate;
+            usingRealData = true;
+          } else {
+            // Final fallback: use bundle default with multiplier
+            component.typical_cost = Math.round(component.typical_cost * multiplier);
+          }
         }
       });
       
@@ -224,8 +291,9 @@ export async function POST(request: NextRequest) {
         // UI compatibility fields
         negotiatedRate: costDetails.totalCost,
         miles: parseFloat((Math.random() * 10 + 0.5).toFixed(1)),
-        // Add flag to show if using real rates
-        usingRealRates: realRates !== null && realRates.size > 0
+        // New fields to indicate data source
+        dataSource: usingRealData ? (hasGCPRates ? 'BCBS MRF Data' : 'Local MRF Data') : 'Estimated',
+        usingRealPricing: usingRealData
       };
     }).sort((a: any, b: any) => a.estimatedPatientCost - b.estimatedPatientCost);
     
@@ -237,8 +305,11 @@ export async function POST(request: NextRequest) {
       avg: Math.round(patientCosts.reduce((a: number, b: number) => a + b, 0) / patientCosts.length),
       count: providers.length,
       bundleUsed: bundle.name,
-      realRatesFound: realRates?.size || 0,
-      cptCodesQueried: bundleCptCodes.length
+      mrfRatesFound: mrfRateMap.size,
+      gcpRatesFound: gcpRates.size,
+      totalMrfRates: allRates.length,
+      dataSource: hasGCPRates ? 'Real BCBS MRF rates from BigQuery' : 
+                  mrfRateMap.size > 0 ? 'Local MRF data' : 'Estimated rates'
     };
     
     return NextResponse.json({
@@ -257,9 +328,9 @@ export async function POST(request: NextRequest) {
         deductibleMet: 0,
         message: isHSA ? 
           'With your HSA plan, you pay the full negotiated rate until you meet your deductible.' :
-          'Your plan includes copays for office visits and coinsurance for other services.',
-        usingRealRates: realRates !== null && realRates.size > 0
-      }
+          'Your plan includes copays for office visits and coinsurance for other services.'
+      },
+      usingRealMRFData: hasGCPRates || mrfRateMap.size > 0
     });
     
   } catch (error) {

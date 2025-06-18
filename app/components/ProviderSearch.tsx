@@ -12,35 +12,47 @@ interface Provider {
   costNote: string;
   distance: number;
   waitTime: string;
+  dataSource?: string;
+  usingRealPricing?: boolean;
+  npi?: string;
+  phone?: string;
 }
 
 interface Props {
   insuranceCompany?: string;
   matchedPlan?: any;
   symptom?: string;
-  symptomAnalysis?: any; // Added this prop
+  symptomAnalysis?: any;
+  userLocation?: {
+    city: string;
+    state: string;
+    zip?: string;
+  };
 }
 
 export default function ProviderSearch({ 
   insuranceCompany, 
   matchedPlan, 
   symptom = 'office visit',
-  symptomAnalysis // Added this prop
+  symptomAnalysis,
+  userLocation = { city: 'Houston', state: 'TX' }
 }: Props) {
   const [selectedType, setSelectedType] = useState<string>('all');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState<any>(null);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [usingRealData, setUsingRealData] = useState(false);
+  const [usingNPIData, setUsingNPIData] = useState(false);
 
   useEffect(() => {
-    if (symptom) { // Only fetch if there's a symptom
+    if (symptom) {
       fetchProviders();
     }
-  }, [selectedType, matchedPlan, symptom, symptomAnalysis]); // Added symptomAnalysis to deps
+  }, [selectedType, matchedPlan, symptom, symptomAnalysis]);
 
   async function fetchProviders() {
-    if (!symptom) return; // Don't fetch without a symptom
+    if (!symptom) return;
     
     setLoading(true);
     
@@ -68,13 +80,70 @@ export default function ProviderSearch({
         console.log('🔄 Using fallback CPT mapping:', cptCodes);
       }
       
+      // First, try to fetch real providers from NPI Registry
+      console.log(`🔍 Fetching real providers from NPI Registry in ${userLocation.city}, ${userLocation.state}...`);
+      const npiUrl = new URL('/api/providers-npi', window.location.origin);
+      npiUrl.searchParams.set('city', userLocation.city);
+      npiUrl.searchParams.set('state', userLocation.state);
+      npiUrl.searchParams.set('type', selectedType === 'er' ? 'emergency' : selectedType);
+      if (userLocation.zip) {
+        npiUrl.searchParams.set('zip', userLocation.zip);
+      }
+      
+      const npiResponse = await fetch(npiUrl.toString());
+      const npiData = await npiResponse.json();
+      
+      if (npiData.success && npiData.providers.length > 0) {
+        console.log(`✅ Found ${npiData.providers.length} real providers from NPI`);
+        setUsingNPIData(true);
+        
+        // Enrich NPI providers with cost data
+        const enrichResponse = await fetch('/api/providers-npi', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            providers: npiData.providers,
+            planId: matchedPlan?.id || 'unknown',
+            cptCodes
+          })
+        });
+        
+        const enrichedData = await enrichResponse.json();
+        
+        if (enrichedData.success) {
+          let filtered = enrichedData.providers;
+          
+          // Auto-filter by care setting based on GPT-4 urgency
+          if (symptomAnalysis?.urgency === 'emergency') {
+            setSelectedType('er');
+            filtered = filtered.filter((p: Provider) => p.type === 'Emergency Room');
+          } else if (symptomAnalysis?.urgency === 'urgent') {
+            setSelectedType('urgent_care');
+            filtered = filtered.filter((p: Provider) => p.type === 'Urgent Care');
+          } else if (selectedType !== 'all') {
+            // Only apply manual filter if no auto-filter from urgency
+            if (selectedType === 'urgent_care') filtered = filtered.filter((p: Provider) => p.type === 'Urgent Care');
+            if (selectedType === 'er') filtered = filtered.filter((p: Provider) => p.type === 'Emergency Room');
+          }
+          
+          setProviders(filtered);
+          setStats(enrichedData.stats);
+          setUsingRealData(enrichedData.providers.some((p: any) => p.usingRealPricing));
+          return;
+        }
+      }
+      
+      // Fallback to original provider-costs-local API if NPI fails
+      console.log('⚠️ Falling back to local provider data...');
+      setUsingNPIData(false);
+      
       const response = await fetch('/api/provider-costs-local', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           planId: matchedPlan?.id || 'unknown',
           symptom,
-          cptCodes, // Pass the array of CPT codes
+          cptCodes,
           urgency
         })
       });
@@ -99,6 +168,7 @@ export default function ProviderSearch({
         
         setProviders(filtered);
         setStats(data.stats);
+        setUsingRealData(data.usingRealMRFData || false);
       }
     } catch (error) {
       console.error('Failed to fetch providers:', error);
@@ -110,6 +180,24 @@ export default function ProviderSearch({
   return (
     <div className="mt-8">
       <h2 className="text-2xl font-bold mb-4">Find Care Near You</h2>
+      
+      {usingRealData && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+          <p className="text-sm text-green-800 flex items-center gap-2">
+            <span className="text-lg">✓</span>
+            <span>Prices based on actual BCBS negotiated rates from MRF data</span>
+          </p>
+        </div>
+      )}
+      
+      {usingNPIData && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <p className="text-sm text-blue-800 flex items-center gap-2">
+            <span className="text-lg">🏥</span>
+            <span>Showing real healthcare providers from NPI registry</span>
+          </p>
+        </div>
+      )}
       
       {matchedPlan?.id?.includes('hsa') && (
         <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
@@ -166,6 +254,11 @@ export default function ProviderSearch({
                 Found {stats.count} providers • 
                 Costs range from <strong>${stats.min}</strong> to <strong>${stats.max}</strong> 
                 {insuranceCompany && ` with ${insuranceCompany}`}
+                {stats.dataSource && (
+                  <span className="text-xs ml-2 text-blue-700">
+                    ({stats.dataSource})
+                  </span>
+                )}
               </p>
             </div>
           )}
@@ -190,6 +283,16 @@ export default function ProviderSearch({
                         Lower Cost
                       </span>
                     )}
+                    {provider.dataSource && provider.dataSource.includes('MRF') && (
+                      <span className="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-700">
+                        Real MRF Data
+                      </span>
+                    )}
+                    {provider.npi && (
+                      <span className="px-2 py-1 text-xs rounded-full bg-indigo-100 text-indigo-700">
+                        NPI: {provider.npi}
+                      </span>
+                    )}
                   </div>
                   <p className="text-gray-600">{provider.address}</p>
                   <div className="mt-2 flex items-center gap-4 text-sm text-gray-500">
@@ -209,14 +312,31 @@ export default function ProviderSearch({
                       💊 On-site pharmacy
                     </p>
                   )}
+                  
+                  {provider.specialty && (
+                    <p className="text-gray-600 text-sm mt-1">
+                      🩺 {provider.specialty}
+                    </p>
+                  )}
                 </div>
 
                 <div className="text-right ml-4">
                   <div className="mb-2">
-                    <p className="text-3xl font-bold text-gray-900">
-                      ${provider.estimatedPatientCost}
-                    </p>
-                    <p className="text-xs text-gray-500">{provider.costNote}</p>
+                    {provider.costRange ? (
+                      <>
+                        <p className="text-2xl font-bold text-gray-900">
+                          ${provider.costRange.min} - ${provider.costRange.max}
+                        </p>
+                        <p className="text-xs text-gray-500">Estimated range</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-3xl font-bold text-gray-900">
+                          ${provider.estimatedPatientCost}
+                        </p>
+                        <p className="text-xs text-gray-500">{provider.costNote}</p>
+                      </>
+                    )}
                   </div>
                   
                   {provider.totalCost && (
@@ -242,6 +362,11 @@ export default function ProviderSearch({
                     <div className="mt-3 p-4 bg-gray-50 rounded-lg text-sm">
                       <div className="font-semibold mb-3 text-gray-900">
                         {provider.bundleName}
+                        {provider.dataSource && (
+                          <span className="ml-2 text-xs font-normal text-gray-600">
+                            • Source: {provider.dataSource}
+                          </span>
+                        )}
                       </div>
                       
                       {provider.costBreakdown.map((category: any, catIdx: number) => (
@@ -275,6 +400,15 @@ export default function ProviderSearch({
                           <span>${provider.estimatedPatientCost}</span>
                         </div>
                       </div>
+                      
+                      {provider.dataSource && provider.dataSource.includes('MRF') && (
+                        <div className="mt-3 p-2 bg-purple-50 rounded text-xs">
+                          <p className="text-purple-800">
+                            💡 These prices are based on actual negotiated rates from BCBS MRF files.
+                            Actual costs may vary based on your specific plan details.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

@@ -4,12 +4,18 @@ import InsuranceCardUpload from './components/InsuranceCardUpload';
 import CostCard from './components/CostCard';
 import ProviderSearch from './components/ProviderSearch';
 import SymptomChecker from './components/SymptomChecker';
+import LocationInput from './components/LocationInput'; // unused, remove if unnecessary
 
 export default function Home() {
   const [extractedData, setExtractedData] = useState<any>(null);
   const [matchedPlan, setMatchedPlan] = useState<any>(null);
   const [lastSymptom, setLastSymptom] = useState<string>('');
   const [symptomAnalysis, setSymptomAnalysis] = useState<any>(null);
+  const [userLocation, setUserLocation] = useState({
+    city: 'Houston',
+    state: 'TX',
+    zip: '77001'
+  });
 
   const handleDataExtracted = (data: any, plan?: any) => {
     setExtractedData(data);
@@ -29,10 +35,8 @@ export default function Home() {
           Upload your insurance card to find care you can afford
         </p>
 
-        {/* Step 1: Upload Insurance Card */}
         <InsuranceCardUpload onDataExtracted={handleDataExtracted} />
 
-        {/* Step 2: Show Insurance Info & Costs */}
         {extractedData && (
           <>
             <div className="mt-8 p-6 bg-blue-50 rounded-lg">
@@ -90,13 +94,11 @@ export default function Home() {
           </>
         )}
 
-        {/* Step 3: Symptom Checker */}
         <SymptomChecker
           insurancePlan={matchedPlan}
           onSymptomSearch={handleSymptomSearch}
         />
 
-        {/* Step 4: Find Providers */}
         <ProviderSearch
           insuranceCompany={extractedData?.companyName}
           matchedPlan={matchedPlan}
