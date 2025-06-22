@@ -67,42 +67,79 @@ export interface NPISearchParams {
   skip?: number;
 }
 
+// Helper function to calculate distance between two coordinates
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3959; // Radius of the Earth in miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// ZIP code to approximate lat/lon (for common Texas ZIPs)
+const ZIP_COORDINATES: Record<string, { lat: number; lon: number }> = {
+  '77001': { lat: 29.7530, lon: -95.3698 }, // Houston
+  '77002': { lat: 29.7589, lon: -95.3677 },
+  '77003': { lat: 29.7436, lon: -95.3491 },
+  '77004': { lat: 29.7199, lon: -95.3660 },
+  '77005': { lat: 29.7168, lon: -95.4215 },
+  '77006': { lat: 29.7376, lon: -95.3999 },
+  '77007': { lat: 29.7752, lon: -95.4019 },
+  '77008': { lat: 29.7989, lon: -95.3976 },
+  '77009': { lat: 29.7869, lon: -95.3541 },
+  '77019': { lat: 29.7502, lon: -95.4145 },
+  '77024': { lat: 29.7807, lon: -95.5245 },
+  '77025': { lat: 29.6908, lon: -95.4244 },
+  '77027': { lat: 29.7491, lon: -95.4574 },
+  '77030': { lat: 29.7105, lon: -95.3820 },
+  '77054': { lat: 29.6868, lon: -95.3958 },
+  '77056': { lat: 29.7557, lon: -95.4839 },
+  '77057': { lat: 29.7490, lon: -95.4962 },
+  '77401': { lat: 29.5544, lon: -95.8044 }, // Bellaire
+  '77407': { lat: 29.7058, lon: -95.5972 }, // Richmond
+  // Add more as needed
+};
+
 export class NPIRegistryService {
   /**
-   * Get nearby ZIP codes for a given ZIP
+   * Get nearby ZIP codes for a given ZIP with actual distance calculation
    */
-  static getNearbyZipCodes(zip: string): string[] {
-    // Extract 5-digit ZIP if ZIP+4 format
+  static getNearbyZipCodes(zip: string, maxDistance: number = 15): string[] {
     const zip5 = zip.substring(0, 5);
+    const origin = ZIP_COORDINATES[zip5];
     
-    // Houston area ZIP codes
-    const houstonZips: Record<string, string[]> = {
-      '77001': ['77002', '77003', '77004', '77005', '77006', '77007', '77008', '77009'],
-      '77002': ['77001', '77003', '77010', '77019', '77006', '77007'],
-      '77005': ['77001', '77006', '77025', '77030', '77098', '77019'],
-      '77006': ['77005', '77019', '77098', '77007', '77001'],
-      '77007': ['77008', '77009', '77019', '77006', '77001'],
-      '77008': ['77007', '77009', '77018', '77022'],
-      '77019': ['77005', '77006', '77007', '77024', '77027', '77098'],
-      '77024': ['77019', '77027', '77055', '77056', '77057', '77063'],
-      '77025': ['77005', '77030', '77054', '77096', '77035'],
-      '77027': ['77019', '77024', '77056', '77098', '77081'],
-      '77030': ['77004', '77021', '77025', '77054', '77005'],
-      '77054': ['77030', '77035', '77045', '77051', '77025'],
-      // Add more Houston ZIP codes
-      '77056': ['77027', '77024', '77057', '77063', '77055'],
-      '77057': ['77056', '77063', '77042', '77081', '77024'],
-      '77063': ['77057', '77055', '77024', '77042', '77077'],
-      '77077': ['77082', '77083', '77079', '77042', '77063'],
-      '77082': ['77077', '77083', '77099', '77079'],
-      // Medical Center area
-      '77004': ['77030', '77021', '77051', '77003', '77001'],
-      '77021': ['77004', '77030', '77051', '77033', '77047'],
-      // More areas
-      '77098': ['77006', '77019', '77005', '77027'],
-    };
+    if (!origin) {
+      // If we don't have coordinates, return the original ZIP
+      return [zip5];
+    }
     
-    return houstonZips[zip5] || [zip5];
+    const nearbyZips: Array<{ zip: string; distance: number }> = [];
+    
+    // Calculate distances to all known ZIPs
+    for (const [otherZip, coords] of Object.entries(ZIP_COORDINATES)) {
+      if (otherZip === zip5) continue;
+      
+      const distance = calculateDistance(
+        origin.lat, origin.lon,
+        coords.lat, coords.lon
+      );
+      
+      if (distance <= maxDistance) {
+        nearbyZips.push({ zip: otherZip, distance });
+      }
+    }
+    
+    // Sort by distance and return ZIP codes
+    return [
+      zip5,
+      ...nearbyZips
+        .sort((a, b) => a.distance - b.distance)
+        .map(item => item.zip)
+    ];
   }
   
   /**
@@ -139,17 +176,21 @@ export class NPIRegistryService {
       const clinicalTaxonomies = [
         'Urgent Care', 'Emergency Medicine', 'Family Medicine', 
         'Internal Medicine', 'Clinic/Center', 'Hospital',
-        'Walk-in', 'Immediate Care', 'Express Care'
+        'Walk-in', 'Immediate Care', 'Express Care',
+        'Ambulatory', 'Primary Care', 'General Practice'
       ];
       
       const clinicalProviders = providers.filter((p: NPIProvider) => 
         p.taxonomies.some((t: any) => 
-          clinicalTaxonomies.some(ct => t.desc.includes(ct))
+          clinicalTaxonomies.some(ct => t.desc?.toLowerCase().includes(ct.toLowerCase()))
         ) &&
         // Filter out administrative entities
-        !p.basic.organization_name?.includes('ADMITTING') &&
-        !p.basic.organization_name?.includes('BILLING') &&
-        !p.basic.organization_name?.includes('ADMINISTRATIVE')
+        !p.basic.organization_name?.toLowerCase().includes('admitting') &&
+        !p.basic.organization_name?.toLowerCase().includes('billing') &&
+        !p.basic.organization_name?.toLowerCase().includes('administrative') &&
+        !p.basic.organization_name?.toLowerCase().includes('anesthesia') &&
+        !p.basic.organization_name?.toLowerCase().includes('radiology') &&
+        !p.basic.organization_name?.toLowerCase().includes('pathology')
       );
       
       return clinicalProviders;
@@ -161,7 +202,7 @@ export class NPIRegistryService {
   }
   
   /**
-   * Search providers with location filtering
+   * Search providers with location filtering and distance calculation
    */
   static async searchProvidersNearby(
     city: string, 
@@ -172,79 +213,99 @@ export class NPIRegistryService {
     limit: number = 20
   ): Promise<NPIProvider[]> {
     const allProviders: NPIProvider[] = [];
-    
-    // Extract 5-digit ZIP if ZIP+4 format
     const zip5 = zip.substring(0, 5);
+    const userCoords = ZIP_COORDINATES[zip5];
     
-    // Search the main ZIP
-    const mainResults = await this.searchProviders({
-      city,
-      state,
+    console.log(`🔍 Searching for providers near ${city}, ${state} ${zip5}`);
+    
+    // First try exact ZIP code
+    const zipResults = await this.searchProviders({
       postal_code: zip5,
+      state,
       taxonomy_description: taxonomyDesc,
       enumeration_type: enumerationType,
-      limit: Math.ceil(limit / 2)
+      limit: 50
     });
     
-    allProviders.push(...mainResults);
+    allProviders.push(...zipResults);
+    console.log(`Found ${zipResults.length} providers in ZIP ${zip5}`);
     
-    // If we don't have enough, search nearby ZIPs
-    if (allProviders.length < limit / 2) {
-      const nearbyZips = this.getNearbyZipCodes(zip5);
+    // If we need more providers, search nearby ZIPs
+    if (allProviders.length < limit) {
+      const nearbyZips = this.getNearbyZipCodes(zip5, 20); // 20 mile radius
+      console.log(`Searching ${nearbyZips.length - 1} nearby ZIPs:`, nearbyZips.slice(1));
       
-      for (const nearbyZip of nearbyZips) {
-        if (allProviders.length >= limit) break;
+      for (const nearbyZip of nearbyZips.slice(1)) { // Skip first (original ZIP)
+        if (allProviders.length >= limit * 2) break; // Get extra for filtering
         
         const nearbyResults = await this.searchProviders({
           postal_code: nearbyZip,
           state,
           taxonomy_description: taxonomyDesc,
           enumeration_type: enumerationType,
-          limit: 5
+          limit: 10
         });
         
         allProviders.push(...nearbyResults);
       }
     }
     
-    // Also try state-wide search if still not enough
-    if (allProviders.length < 5) {
-      const stateResults = await this.searchProviders({
+    // If still not enough, try city-wide search
+    if (allProviders.length < 10) {
+      console.log(`Expanding search to all of ${city}, ${state}`);
+      const cityResults = await this.searchProviders({
+        city,
         state,
         taxonomy_description: taxonomyDesc,
         enumeration_type: enumerationType,
-        limit: 10
+        limit: 30
       });
       
-      // Filter to only include providers in the right city
-      const cityFiltered = stateResults.filter((p: NPIProvider) => {
+      // Filter to only include providers actually in the specified city
+      const cityFiltered = cityResults.filter((p: NPIProvider) => {
         const location = p.addresses.find((a: any) => a.address_purpose === 'LOCATION');
-        return location?.city === city.toUpperCase();
+        return location?.city.toUpperCase() === city.toUpperCase();
       });
       
       allProviders.push(...cityFiltered);
     }
     
-    // Remove duplicates and wrong locations
-    const unique = Array.from(
+    // Remove duplicates by NPI
+    const uniqueProviders = Array.from(
       new Map(allProviders.map(p => [p.number, p])).values()
-    ).filter((p: NPIProvider) => {
-      const location = p.addresses.find((a: any) => a.address_purpose === 'LOCATION');
-      // Filter out wrong states
-      if (location?.state !== state) return false;
-      // Filter out obviously wrong cities
-      if (location?.city && !location.city.includes(city.toUpperCase()) && 
-          location.city !== city.toUpperCase()) {
-        // Allow nearby cities for Houston
-        const nearbyCities = ['HOUSTON', 'BELLAIRE', 'WEST UNIVERSITY PLACE', 'PASADENA', 'PEARLAND', 'SUGAR LAND', 'KATY', 'THE WOODLANDS'];
-        if (city.toUpperCase() === 'HOUSTON' && !nearbyCities.includes(location.city)) {
-          return false;
-        }
-      }
-      return true;
-    });
+    );
     
-    return unique.slice(0, limit);
+    // Calculate distances if we have user coordinates
+    let providersWithDistance = uniqueProviders;
+    if (userCoords) {
+      providersWithDistance = uniqueProviders.map(provider => {
+        const location = provider.addresses.find(a => a.address_purpose === 'LOCATION');
+        if (!location) return { ...provider, distance: 999 };
+        
+        // Try to get coordinates for provider's ZIP
+        const providerZip5 = location.postal_code.substring(0, 5);
+        const providerCoords = ZIP_COORDINATES[providerZip5];
+        
+        if (providerCoords) {
+          const distance = calculateDistance(
+            userCoords.lat, userCoords.lon,
+            providerCoords.lat, providerCoords.lon
+          );
+          return { ...provider, distance: Math.round(distance * 10) / 10 };
+        }
+        
+        // If we don't have coordinates, estimate based on ZIP difference
+        const zipDiff = Math.abs(parseInt(providerZip5) - parseInt(zip5));
+        const estimatedDistance = zipDiff < 10 ? zipDiff * 0.5 : zipDiff * 0.8;
+        return { ...provider, distance: Math.round(estimatedDistance * 10) / 10 };
+      });
+      
+      // Sort by distance
+      providersWithDistance.sort((a: any, b: any) => a.distance - b.distance);
+    }
+    
+    console.log(`✅ Returning ${Math.min(providersWithDistance.length, limit)} providers sorted by distance`);
+    return providersWithDistance.slice(0, limit);
   }
   
   /**
@@ -275,38 +336,28 @@ export class NPIRegistryService {
    * Search for urgent care centers near a location
    */
   static async findUrgentCare(city: string, state: string, limit: number = 10, zip: string = ''): Promise<NPIProvider[]> {
-    // Use nearby search if ZIP provided
     if (zip) {
       return this.searchProvidersNearby(city, state, zip, 'Urgent Care', 'NPI-2', limit);
     }
     
-    // Otherwise use original search
-    // Try multiple search strategies for better results
-    const searches = [
-      // Direct urgent care search
-      this.searchProviders({
-        city,
-        state,
-        taxonomy_description: 'Urgent Care',
-        enumeration_type: 'NPI-2',
-        limit: Math.ceil(limit / 2)
-      }),
-      // Also search for clinics
-      this.searchProviders({
-        city,
-        state,
-        organization_name: 'clinic',
-        enumeration_type: 'NPI-2',
-        limit: Math.ceil(limit / 2)
-      })
-    ];
+    // Search multiple related terms
+    const searchTerms = ['Urgent Care', 'Walk-in Clinic', 'Immediate Care', 'Express Care'];
+    const allResults: NPIProvider[] = [];
     
-    const results = await Promise.all(searches);
-    const combined = [...results[0], ...results[1]];
+    for (const term of searchTerms) {
+      const results = await this.searchProviders({
+        city,
+        state,
+        taxonomy_description: term,
+        enumeration_type: 'NPI-2',
+        limit: Math.ceil(limit / searchTerms.length)
+      });
+      allResults.push(...results);
+    }
     
     // Remove duplicates by NPI
     const unique = Array.from(
-      new Map(combined.map(p => [p.number, p])).values()
+      new Map(allResults.map(p => [p.number, p])).values()
     );
     
     return unique.slice(0, limit);
@@ -320,13 +371,30 @@ export class NPIRegistryService {
       return this.searchProvidersNearby(city, state, zip, 'Emergency Medicine', 'NPI-2', limit);
     }
     
-    return this.searchProviders({
+    // Also search for hospitals with emergency departments
+    const erResults = await this.searchProviders({
       city,
       state,
       taxonomy_description: 'Emergency Medicine',
       enumeration_type: 'NPI-2',
-      limit
+      limit: limit / 2
     });
+    
+    const hospitalResults = await this.searchProviders({
+      city,
+      state,
+      organization_name: 'hospital',
+      enumeration_type: 'NPI-2',
+      limit: limit / 2
+    });
+    
+    // Filter hospitals to likely have ERs
+    const hospitalERs = hospitalResults.filter(h => 
+      !h.basic.organization_name?.toLowerCase().includes('rehab') &&
+      !h.basic.organization_name?.toLowerCase().includes('psychiatric')
+    );
+    
+    return [...erResults, ...hospitalERs].slice(0, limit);
   }
   
   /**
@@ -350,7 +418,8 @@ export class NPIRegistryService {
     const taxonomies = [
       'Family Medicine',
       'Internal Medicine',
-      'General Practice'
+      'General Practice',
+      'Primary Care'
     ];
     
     const results: NPIProvider[] = [];
@@ -361,7 +430,7 @@ export class NPIRegistryService {
         state,
         taxonomy_description: taxonomy,
         enumeration_type: 'NPI-1', // Individuals
-        limit: Math.floor(limit / 3)
+        limit: Math.floor(limit / taxonomies.length)
       });
       results.push(...providers);
     }
@@ -372,13 +441,14 @@ export class NPIRegistryService {
   /**
    * Format provider for display
    */
-  static formatProvider(provider: NPIProvider): {
+  static formatProvider(provider: NPIProvider & { distance?: number }): {
     name: string;
     type: string;
     address: string;
     phone: string;
     npi: string;
     specialty: string;
+    distance?: number;
   } {
     const location = provider.addresses.find(a => a.address_purpose === 'LOCATION') || provider.addresses[0];
     const primaryTaxonomy = provider.taxonomies.find(t => t.primary) || provider.taxonomies[0];
@@ -386,7 +456,7 @@ export class NPIRegistryService {
     const name = provider.basic.organization_name || 
                  `${provider.basic.first_name} ${provider.basic.last_name}${provider.basic.credential ? ', ' + provider.basic.credential : ''}`;
     
-    // Extract 5-digit ZIP from ZIP+4 format
+    // Format ZIP code
     const fullZip = location.postal_code || '';
     const zip5 = fullZip.substring(0, 5);
     const formattedZip = fullZip.length > 5 ? `${zip5}-${fullZip.substring(5)}` : zip5;
@@ -397,7 +467,8 @@ export class NPIRegistryService {
       address: `${location.address_1}${location.address_2 ? ' ' + location.address_2 : ''}, ${location.city}, ${location.state} ${formattedZip}`,
       phone: location.telephone_number || 'N/A',
       npi: provider.number,
-      specialty: primaryTaxonomy?.desc || 'General'
+      specialty: primaryTaxonomy?.desc || 'General',
+      distance: provider.distance
     };
   }
 }

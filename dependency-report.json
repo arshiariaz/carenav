@@ -1,0 +1,256 @@
+{
+  "summary": {
+    "total": 41,
+    "used": 20,
+    "unused": 21,
+    "orphaned": 0
+  },
+  "unused": [
+    "app/components/CostBreakdown.tsx",
+    "app/components/CostCard.tsx",
+    "components/ProviderNetworkChecker.tsx",
+    "components/ui/card.tsx",
+    "lib/healthcare-apis.ts",
+    "lib/npi-registry-improved.ts",
+    "lib/npi-registry.ts",
+    "lib/procedure-bundles.ts",
+    "lib/provider-directory-apis.ts",
+    "lib/provider-intelligence.ts",
+    "lib/provider-search-service.ts",
+    "lib/rate-limiter.ts",
+    "lib/symptom-mapping.ts",
+    "lib/types/healthcare.ts",
+    "lib/utils.ts",
+    "next-env.d.ts",
+    "next.config.ts",
+    "scripts/debug-npi.ts",
+    "scripts/setup/seed-pinecone.ts",
+    "scripts/setup/setup-bigquery.ts",
+    "test-apis.ts"
+  ],
+  "orphaned": [],
+  "dependencies": {
+    "app/api/care-finder/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/insurance-network/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/match-plan/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/my-plan/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/ocr/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/plan-assistant/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/provider-costs-local/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/provider-network/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/providers-npi/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/symptom-triage/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/api/test-npi/route.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/components/CostBreakdown.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "app/components/CostCard.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "app/components/InsuranceCardUpload.tsx": {
+      "imports": [],
+      "importedBy": [
+        "app/page.tsx"
+      ],
+      "isUsed": true
+    },
+    "app/components/LocationInput.tsx": {
+      "imports": [],
+      "importedBy": [
+        "app/page.tsx"
+      ],
+      "isUsed": true
+    },
+    "app/components/ProviderSearch.tsx": {
+      "imports": [],
+      "importedBy": [
+        "app/page.tsx"
+      ],
+      "isUsed": true
+    },
+    "app/components/SymptomChecker.tsx": {
+      "imports": [],
+      "importedBy": [
+        "app/page.tsx"
+      ],
+      "isUsed": true
+    },
+    "app/layout.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/my-benefits/page.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/network-test/page.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/page.tsx": {
+      "imports": [
+        "app/components/InsuranceCardUpload.tsx",
+        "app/components/ProviderSearch.tsx",
+        "app/components/SymptomChecker.tsx",
+        "app/components/LocationInput.tsx"
+      ],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "app/test-insurance/page.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": true
+    },
+    "components/ProviderNetworkChecker.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "components/ui/card.tsx": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/healthcare-apis.ts": {
+      "imports": [],
+      "importedBy": [
+        "test-apis.ts"
+      ],
+      "isUsed": false
+    },
+    "lib/npi-registry-improved.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/npi-registry.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/procedure-bundles.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/provider-directory-apis.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/provider-intelligence.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/provider-search-service.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/rate-limiter.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/symptom-mapping.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/types/healthcare.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "lib/utils.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "next-env.d.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "next.config.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "scripts/debug-npi.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "scripts/setup/seed-pinecone.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "scripts/setup/setup-bigquery.ts": {
+      "imports": [],
+      "importedBy": [],
+      "isUsed": false
+    },
+    "test-apis.ts": {
+      "imports": [
+        "lib/healthcare-apis.ts"
+      ],
+      "importedBy": [],
+      "isUsed": false
+    }
+  }
+}

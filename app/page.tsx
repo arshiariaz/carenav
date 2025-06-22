@@ -1,10 +1,9 @@
 'use client';
 import { useState } from 'react';
 import InsuranceCardUpload from './components/InsuranceCardUpload';
-import CostCard from './components/CostCard';
 import ProviderSearch from './components/ProviderSearch';
 import SymptomChecker from './components/SymptomChecker';
-import LocationInput from './components/LocationInput'; // unused, remove if unnecessary
+import LocationInput from './components/LocationInput';
 
 export default function Home() {
   const [extractedData, setExtractedData] = useState<any>(null);
@@ -27,6 +26,22 @@ export default function Home() {
     setSymptomAnalysis(analysis);
   };
 
+  const handleLocationChange = (location: { 
+    address?: string; 
+    city: string; 
+    state: string; 
+    zip?: string;
+    lat?: number;
+    lng?: number;
+  }) => {
+    console.log('📍 Location changed:', location);
+    setUserLocation({
+      city: location.city,
+      state: location.state,
+      zip: location.zip || ''
+    });
+  };
+
   return (
     <main className="min-h-screen p-8">
       <div className="max-w-4xl mx-auto">
@@ -37,62 +52,34 @@ export default function Home() {
 
         <InsuranceCardUpload onDataExtracted={handleDataExtracted} />
 
-        {extractedData && (
-          <>
-            <div className="mt-8 p-6 bg-blue-50 rounded-lg">
-              <h2 className="text-xl font-semibold mb-4">Your Insurance Info</h2>
-              <div className="space-y-2">
-                <p><strong>Insurance:</strong> {extractedData.companyName}</p>
-                <p><strong>Member ID:</strong> {extractedData.memberId}</p>
-                <p><strong>Group:</strong> {extractedData.groupNumber}</p>
-                {matchedPlan && (
-                  <p className="text-green-600 mt-2">
-                    ✓ Matched to {matchedPlan.name} plan
-                  </p>
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
-              <CostCard
-                title="Urgent Care Visit"
-                cost={{
-                  min: matchedPlan?.copays?.urgentCare || 75,
-                  max: 200,
-                  avg: matchedPlan?.copays?.urgentCare || 125
-                }}
-                insurance={extractedData.companyName}
-              />
-              <CostCard
-                title="ER Visit"
-                cost={{
-                  min: matchedPlan?.copays?.emergency || 500,
-                  max: 3000,
-                  avg: matchedPlan?.copays?.emergency || 1200
-                }}
-                insurance={extractedData.companyName}
-              />
-              <CostCard
-                title="Primary Care"
-                cost={{
-                  min: matchedPlan?.copays?.primaryCare || 25,
-                  max: 150,
-                  avg: matchedPlan?.copays?.primaryCare || 50
-                }}
-                insurance={extractedData.companyName}
-              />
-              <CostCard
-                title="Specialist Visit"
-                cost={{
-                  min: matchedPlan?.copays?.specialist || 50,
-                  max: 300,
-                  avg: matchedPlan?.copays?.specialist || 150
-                }}
-                insurance={extractedData.companyName}
-              />
-            </div>
-          </>
+        {extractedData && matchedPlan && (
+          <div className="mt-4">
+            <a 
+              href={`/my-benefits?planId=${matchedPlan.id}&carrier=${extractedData.companyName}`}
+              className="inline-block bg-green-500 text-white px-6 py-3 rounded hover:bg-green-600"
+            >
+              View My Full Benefits →
+            </a>
+          </div>
         )}
+
+        {extractedData && (
+          <div className="mt-8 p-6 bg-blue-50 rounded-lg">
+            <h2 className="text-xl font-semibold mb-4">Your Insurance Info</h2>
+            <div className="space-y-2">
+              <p><strong>Insurance:</strong> {extractedData.companyName}</p>
+              <p><strong>Member ID:</strong> {extractedData.memberId}</p>
+              <p><strong>Group:</strong> {extractedData.groupNumber}</p>
+              {matchedPlan && (
+                <p className="text-green-600 mt-2">
+                  ✓ Matched to {matchedPlan.name} plan
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        <LocationInput onLocationChange={handleLocationChange} />
 
         <SymptomChecker
           insurancePlan={matchedPlan}
@@ -102,8 +89,9 @@ export default function Home() {
         <ProviderSearch
           insuranceCompany={extractedData?.companyName}
           matchedPlan={matchedPlan}
-          symptom={lastSymptom}
+          symptom={lastSymptom || 'office visit'}
           symptomAnalysis={symptomAnalysis}
+          userLocation={userLocation}
         />
       </div>
     </main>

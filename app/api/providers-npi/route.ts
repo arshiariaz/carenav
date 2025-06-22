@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
     
     // Format providers for display
     const formatted = providers
-      .map((p: NPIProvider) => {
+      .map((p: NPIProvider & { distance?: number }) => {
         const formatted = NPIRegistryService.formatProvider(p);
         
         // Filter out providers that are clearly in wrong state/city
@@ -69,16 +69,20 @@ export async function GET(request: NextRequest) {
           type: formatted.specialty.toLowerCase().includes('urgent') ? 'Urgent Care' : 
                 formatted.specialty.toLowerCase().includes('emergency') ? 'Emergency Room' : 
                 formatted.specialty.toLowerCase().includes('clinic') ? 'Urgent Care' :
+                formatted.specialty.toLowerCase().includes('walk-in') ? 'Urgent Care' :
+                formatted.specialty.toLowerCase().includes('immediate') ? 'Urgent Care' :
+                formatted.specialty.toLowerCase().includes('express') ? 'Urgent Care' :
                 formatted.specialty.toLowerCase().includes('family') ? 'Primary Care' :
                 formatted.specialty.toLowerCase().includes('internal') ? 'Primary Care' :
+                formatted.specialty.toLowerCase().includes('primary') ? 'Primary Care' :
                 'Primary Care',
           // These will be populated by cost estimation
           negotiatedRate: 0,
           estimatedPatientCost: 0,
           insurancePays: 0,
           costNote: '',
-          // Default values
-          distance: Math.round(Math.random() * 10 * 10) / 10, // Will be replaced with real distance calc
+          // Use actual distance if available from the service
+          distance: formatted.distance !== undefined ? formatted.distance : Math.round(Math.random() * 10 * 10) / 10,
           waitTime: formatted.type === 'Emergency Room' ? '2-4 hours' : '30-45 min',
           acceptsWalkIns: formatted.type !== 'Primary Care',
           hasPharmacy: Math.random() > 0.5, // Will be enhanced with real data
@@ -198,8 +202,15 @@ export async function POST(request: NextRequest) {
       };
     });
     
-    // Sort by estimated patient cost
-    enrichedProviders.sort((a: any, b: any) => a.estimatedPatientCost - b.estimatedPatientCost);
+    // Sort by distance first (if available), then by patient cost
+    enrichedProviders.sort((a: any, b: any) => {
+      // If both have distance, sort by distance
+      if (a.distance !== undefined && b.distance !== undefined) {
+        return a.distance - b.distance;
+      }
+      // Otherwise sort by patient cost
+      return a.estimatedPatientCost - b.estimatedPatientCost;
+    });
     
     return NextResponse.json({
       success: true,
