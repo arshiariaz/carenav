@@ -4,6 +4,7 @@ import InsuranceCardUpload from './components/InsuranceCardUpload';
 import ProviderSearch from './components/ProviderSearch';
 import SymptomChecker from './components/SymptomChecker';
 import LocationInput from './components/LocationInput';
+import SimpleProviderTest from './components/SimpleProviderTest';
 
 export default function Home() {
   const [extractedData, setExtractedData] = useState<any>(null);
@@ -80,6 +81,9 @@ export default function Home() {
         )}
 
         <LocationInput onLocationChange={handleLocationChange} />
+
+        {/* ADD DEBUG COMPONENT HERE */}
+        <SimpleProviderTest />
 
         <SymptomChecker
           insurancePlan={matchedPlan}
