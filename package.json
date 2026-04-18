@@ -24,6 +24,7 @@
   "form-data": "^4.0.3",
   "langchain": "^0.3.28",
   "lru-cache": "^11.1.0",
+  "lucide-react": "^1.7.0",
   "mindee": "^4.26.0",
   "next": "15.3.3",
   "openai": "^5.5.0",

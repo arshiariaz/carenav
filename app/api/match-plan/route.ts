@@ -1,354 +1,323 @@
 // app/api/match-plan/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { Pinecone } from '@pinecone-database/pinecone';
-import OpenAI from 'openai';
-import { BigQuery } from '@google-cloud/bigquery';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
-// Initialize clients
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+// ── Types ──────────────────────────────────────────────────────────────────────
+interface CMSPlan {
+  plan_id: string;
+  state: string;
+  issuer_id: string;
+  carrier_name: string;
+  carrier_key: string;
+  plan_name: string;
+  plan_variant_name: string;
+  standard_component_id: string;
+  csr_type: string;
+  plan_type: string;
+  metal_level: string;
+  referral_required: boolean;
+  hsa_eligible: boolean;
+  national_network: string;
+  actuarial_value: string;
+  drug_deductible_integrated: string;
+  drug_moop_integrated: string;
+  out_of_country_coverage: string;
+  out_of_service_area_coverage: string;
+  wellness_program: string;
+  disease_management_programs: string;
+  sbc_url: string;
+  formulary_url: string;
+  brochure_url: string;
+  effective_date: string;
+  expiration_date: string;
+  deductible_individual: number | null;
+  deductible_family: number | null;
+  moop_individual: number | null;
+  moop_family: number | null;
+  // Copays
+  pcp_copay: number | string | null;
+  specialist_copay: number | string | null;
+  urgent_care_copay: number | string | null;
+  er_copay: number | string | null;
+  inpatient_copay: number | string | null;
+  rx_tier1_copay: number | string | null;
+  rx_tier2_copay: number | string | null;
+  rx_tier3_copay: number | string | null;
+  rx_tier4_copay: number | string | null;
+  mental_health_copay: number | string | null;
+  preventive_copay: number | string | null;
+  imaging_copay: number | string | null;
+  lab_copay: number | string | null;
+  rehab_copay: number | string | null;
+  snf_copay: number | string | null;
+}
 
-const pinecone = new Pinecone({
-  apiKey: process.env.PINECONE_API_KEY!,
-});
+interface CMSData {
+  metadata: { source: string; generated_at: string; total_plans: number };
+  plans: CMSPlan[];
+  index_by_carrier: Record<string, string[]>;
+  index_by_state_carrier: Record<string, Record<string, string[]>>;
+}
 
-const bigquery = new BigQuery({
-  projectId: process.env.NEXT_PUBLIC_GCP_PROJECT_ID || 'carenav-health',
-  keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS?.endsWith('.json') 
-    ? process.env.GOOGLE_APPLICATION_CREDENTIALS 
-    : undefined,
-  credentials: !process.env.GOOGLE_APPLICATION_CREDENTIALS?.endsWith('.json')
-    ? JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS || '{}')
-    : undefined
-});
+// ── Load CMS data once at module level ────────────────────────────────────────
+let cmsData: CMSData | null = null;
+let planById: Map<string, CMSPlan> | null = null;
 
+function getCMSData(): { data: CMSData; planById: Map<string, CMSPlan> } {
+  if (cmsData && planById) return { data: cmsData, planById };
+
+  try {
+    const filePath = join(process.cwd(), 'data', 'cms_plans.json');
+    const raw = readFileSync(filePath, 'utf-8');
+    cmsData = JSON.parse(raw) as CMSData;
+    planById = new Map(cmsData.plans.map(p => [p.plan_id, p]));
+    console.log(`✅ CMS data loaded: ${cmsData.plans.length} plans`);
+  } catch (err) {
+    console.error('❌ Failed to load cms_plans.json:', err);
+    cmsData = { metadata: { source: '', generated_at: '', total_plans: 0 }, plans: [], index_by_carrier: {}, index_by_state_carrier: {} };
+    planById = new Map();
+  }
+
+  return { data: cmsData!, planById: planById! };
+}
+
+// ── Carrier key normalization (must match Python pipeline) ────────────────────
+function toCarrierKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/inc\.|llc|corp\.|from|insurance|health\s*plan|healthplan/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ── Fuzzy carrier match ────────────────────────────────────────────────────────
+// Returns best matching carrier key from the index
+function findCarrierKey(
+  inputCarrier: string,
+  stateCode: string,
+  data: CMSData
+): string | null {
+  const inputKey = toCarrierKey(inputCarrier);
+  const stateIndex = data.index_by_state_carrier[stateCode] || {};
+  const allKeys = Object.keys(stateIndex);
+
+  // 1. Exact match
+  if (stateIndex[inputKey]) return inputKey;
+
+  // 2. Input contains carrier key or vice versa
+  for (const ck of allKeys) {
+    if (inputKey.includes(ck) || ck.includes(inputKey)) return ck;
+  }
+
+  // 3. Word overlap score
+  const inputWords = new Set(inputKey.split(' ').filter(w => w.length > 2));
+  let bestScore = 0;
+  let bestKey: string | null = null;
+  for (const ck of allKeys) {
+    const ckWords = new Set(ck.split(' ').filter(w => w.length > 2));
+    const overlap = [...inputWords].filter(w => ckWords.has(w)).length;
+    const score = overlap / Math.max(inputWords.size, ckWords.size);
+    if (score > bestScore) { bestScore = score; bestKey = ck; }
+  }
+
+  return bestScore >= 0.4 ? bestKey : null;
+}
+
+// ── CSR variant selection ──────────────────────────────────────────────────────
+// The same base plan exists as 7 CSR variants (-00 through -06)
+// We pick the right one based on plan name hints from OCR
+function selectCSRVariant(
+  candidates: CMSPlan[],
+  planNameHint: string
+): CMSPlan {
+  const hint = planNameHint.toLowerCase();
+
+  // Explicit CSR signals from plan name or member ID prefix
+  if (hint.includes('zero cost') || hint.includes('0 cost'))
+    return candidates.find(p => p.csr_type?.includes('Zero Cost')) ?? candidates[0];
+  if (hint.includes('94%') || hint.includes('value') || hint.includes('csr 94'))
+    return candidates.find(p => p.csr_type?.includes('94%')) ?? candidates[0];
+  if (hint.includes('87%') || hint.includes('csr 87'))
+    return candidates.find(p => p.csr_type?.includes('87%')) ?? candidates[0];
+  if (hint.includes('73%') || hint.includes('csr 73'))
+    return candidates.find(p => p.csr_type?.includes('73%')) ?? candidates[0];
+
+  // Default: On Exchange standard variant (-01)
+  return (
+    candidates.find(p => p.csr_type?.includes('On Exchange')) ??
+    candidates[0]
+  );
+}
+
+// ── Plan name match score ──────────────────────────────────────────────────────
+function planNameScore(cmsPlanName: string, inputName: string): number {
+  const a = cmsPlanName.toLowerCase();
+  const b = inputName.toLowerCase();
+  if (a === b) return 1.0;
+  if (a.includes(b) || b.includes(a)) return 0.8;
+  const aWords = new Set(a.split(/\s+/));
+  const bWords = new Set(b.split(/\s+/));
+  const overlap = [...bWords].filter(w => aWords.has(w) && w.length > 2).length;
+  return overlap / Math.max(aWords.size, bWords.size);
+}
+
+// ── Format plan for frontend ───────────────────────────────────────────────────
+function formatPlan(plan: CMSPlan, matchType: string, confidence: number) {
+  return {
+    // Identity
+    id:             plan.plan_id,
+    name:           plan.plan_variant_name || plan.plan_name,
+    carrier:        plan.carrier_name,
+    type:           plan.plan_type,
+    metalLevel:     plan.metal_level,
+    csrType:        plan.csr_type,
+    summary:        `${plan.carrier_name} ${plan.plan_name} (${plan.metal_level})`,
+
+    // Deductibles
+    deductible:           plan.deductible_individual ?? 0,
+    deductibleFamily:     plan.deductible_family ?? 0,
+    oopMax:               plan.moop_individual ?? 0,
+    oopMaxFamily:         plan.moop_family ?? 0,
+
+    // Copays
+    copays: {
+      primaryCare:  plan.pcp_copay,
+      specialist:   plan.specialist_copay,
+      urgentCare:   plan.urgent_care_copay,
+      emergency:    plan.er_copay,
+      inpatient:    plan.inpatient_copay,
+      generic:      plan.rx_tier1_copay,
+      preferredBrand: plan.rx_tier2_copay,
+      nonPreferredBrand: plan.rx_tier3_copay,
+      specialty:    plan.rx_tier4_copay,
+      mentalHealth: plan.mental_health_copay,
+      preventive:   plan.preventive_copay,
+      imaging:      plan.imaging_copay,
+      lab:          plan.lab_copay,
+      rehab:        plan.rehab_copay,
+    },
+
+    // Plan features
+    features: {
+      referralRequired:     plan.referral_required,
+      outOfNetworkCovered:  plan.out_of_service_area_coverage === 'Yes',
+      outOfCountryCovered:  plan.out_of_country_coverage === 'Yes',
+      nationalNetwork:      plan.national_network === 'Yes',
+      hsaEligible:          plan.hsa_eligible,
+      wellnessProgram:      plan.wellness_program === 'Yes',
+      diseaseManagement:    plan.disease_management_programs,
+      drugDeductibleIntegrated: plan.drug_deductible_integrated === 'Yes',
+    },
+
+    // URLs
+    urls: {
+      sbc:       plan.sbc_url,
+      formulary: plan.formulary_url,
+      brochure:  plan.brochure_url,
+    },
+
+    // Metadata
+    state:          plan.state,
+    issuerId:       plan.issuer_id,
+    effectiveDate:  plan.effective_date,
+    expirationDate: plan.expiration_date,
+    actuarialValue: plan.actuarial_value,
+    dataSource:     'CMS 2026 Exchange PUF',
+    matchType,
+    confidence,
+  };
+}
+
+// ── Main handler ───────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
-    const { companyName, groupNumber, payerId } = await request.json();
-    
-    console.log('🔍 Searching for plan:', { companyName, groupNumber, payerId });
-    
-    // Step 1: Try exact match in BigQuery
-    const exactMatch = await searchBigQueryExact(companyName, groupNumber, payerId);
-    if (exactMatch) {
-      console.log('✅ Found exact match in database');
-      return NextResponse.json({
-        success: true,
-        plan: formatBigQueryPlan(exactMatch),
-        matchType: 'exact',
-        confidence: 1.0
-      });
+    const { companyName, groupNumber, payerId, planName, state } = await request.json();
+
+    console.log('🔍 match-plan request:', { companyName, planName, state });
+
+    const { data, planById: byId } = getCMSData();
+
+    if (data.plans.length === 0) {
+      return NextResponse.json({ success: false, error: 'CMS data not loaded' }, { status: 500 });
     }
-    
-    // Step 2: Try fuzzy match in BigQuery (broader search)
-    const fuzzyMatch = await searchBigQueryFuzzy(companyName, groupNumber);
-    if (fuzzyMatch) {
-      console.log('🔄 Found fuzzy match in database');
+
+    // Infer state from location if not provided
+    const stateCode = (state || 'TX').toUpperCase();
+
+    // ── 1. Find carrier ──────────────────────────────────────────────────────
+    const carrierKey = findCarrierKey(companyName || '', stateCode, data);
+
+    if (!carrierKey) {
+      console.log('⚠️ No carrier match for:', companyName);
       return NextResponse.json({
-        success: true,
-        plan: formatBigQueryPlan(fuzzyMatch),
-        matchType: 'fuzzy',
-        confidence: 0.8
-      });
+        success: false,
+        error: `No plans found for carrier: ${companyName}`,
+        message: 'This may be an employer plan not listed on the ACA marketplace.'
+      }, { status: 404 });
     }
-    
-    // Step 3: Try to find ANY plan from the same carrier
-    const carrierMatch = await findCarrierPlan(companyName);
-    if (carrierMatch) {
-      console.log('🏢 Found plan from same carrier');
-      // Use OpenAI to adjust the benefits based on what we know
-      const adjustedPlan = await adjustPlanWithOpenAI(carrierMatch, groupNumber, payerId);
-      return NextResponse.json({
-        success: true,
-        plan: adjustedPlan,
-        matchType: 'carrier_adjusted',
-        confidence: 0.6
-      });
+
+    // ── 2. Get candidate plans for this carrier in this state ────────────────
+    const stateCarrierIds = data.index_by_state_carrier[stateCode]?.[carrierKey] ?? [];
+    // Fallback: any state if none found in specified state
+    const carrierIds = stateCarrierIds.length > 0
+      ? stateCarrierIds
+      : (data.index_by_carrier[carrierKey] ?? []);
+
+    const candidates = carrierIds
+      .map(id => byId.get(id))
+      .filter((p): p is CMSPlan => p !== undefined);
+
+    if (candidates.length === 0) {
+      return NextResponse.json({ success: false, error: 'No plans found' }, { status: 404 });
     }
-    
-    // Step 4: Use OpenAI to generate realistic plan based on carrier and identifiers
-    console.log('🤖 Using OpenAI to generate plan details...');
-    const aiGeneratedPlan = await generatePlanWithOpenAI(companyName, groupNumber, payerId);
-    
+
+    // ── 3. Match plan name if provided ───────────────────────────────────────
+    const inputPlanName = planName || companyName || '';
+    let matchedBase: CMSPlan | null = null;
+    let nameScore = 0;
+
+    // Group candidates by standard_component_id (base plan, ignoring CSR variants)
+    const byBaseId = new Map<string, CMSPlan[]>();
+    for (const p of candidates) {
+      const baseId = p.standard_component_id || p.plan_id.slice(0, -3);
+      byBaseId.set(baseId, [...(byBaseId.get(baseId) ?? []), p]);
+    }
+
+    // Find best matching base plan
+    let bestGroup: CMSPlan[] = [];
+    for (const [, group] of byBaseId) {
+      const score = planNameScore(group[0].plan_name, inputPlanName);
+      if (score > nameScore) { nameScore = score; bestGroup = group; }
+    }
+
+    if (bestGroup.length > 0) {
+      matchedBase = selectCSRVariant(bestGroup, inputPlanName);
+    } else {
+      // Fall back to first on-exchange standard plan
+      matchedBase = candidates.find(p => p.csr_type?.includes('On Exchange')) ?? candidates[0];
+      nameScore = 0.3;
+    }
+
+    const confidence = Math.min(0.95, 0.5 + nameScore * 0.5);
+    const matchType  = nameScore >= 0.8 ? 'exact' : nameScore >= 0.5 ? 'fuzzy' : 'carrier_only';
+
+    console.log(`✅ Matched: ${matchedBase.plan_id} (${matchType}, confidence ${confidence.toFixed(2)})`);
+
     return NextResponse.json({
-      success: true,
-      plan: aiGeneratedPlan,
-      matchType: 'ai_generated',
-      confidence: 0.5,
-      message: 'Plan details estimated based on carrier and plan identifiers'
+      success:    true,
+      plan:       formatPlan(matchedBase, matchType, confidence),
+      matchType,
+      confidence,
+      message:    `Matched from CMS 2026 Exchange PUF data`,
     });
-    
+
   } catch (error) {
-    console.error('Plan matching error:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Plan matching failed' 
+    console.error('match-plan error:', error);
+    return NextResponse.json({
+      success: false,
+      error: 'Plan matching failed',
+      detail: error instanceof Error ? error.message : 'Unknown error'
     }, { status: 500 });
   }
-}
-
-// Exact match search
-async function searchBigQueryExact(carrier: string, groupNumber?: string, payerId?: string) {
-  if (!groupNumber && !payerId) return null;
-  
-  try {
-    const query = `
-      SELECT *
-      FROM \`${process.env.NEXT_PUBLIC_GCP_PROJECT_ID || 'carenav-health'}.insurance_plans.plan_benefits\`
-      WHERE LOWER(carrier) LIKE CONCAT('%', LOWER(@carrier), '%')
-        AND (
-          (group_number = @groupNumber AND @groupNumber IS NOT NULL) OR
-          (payer_id = @payerId AND @payerId IS NOT NULL)
-        )
-      ORDER BY last_updated DESC
-      LIMIT 1
-    `;
-    
-    const [rows] = await bigquery.query({
-      query,
-      params: { carrier, groupNumber: groupNumber || null, payerId: payerId || null }
-    });
-    
-    return rows.length > 0 ? rows[0] : null;
-  } catch (error) {
-    console.error('BigQuery exact search error:', error);
-    return null;
-  }
-}
-
-// Fuzzy match search
-async function searchBigQueryFuzzy(carrier: string, groupNumber?: string) {
-  try {
-    const query = `
-      SELECT *,
-        CASE
-          WHEN LOWER(carrier) = LOWER(@carrier) THEN 1.0
-          WHEN LOWER(carrier) LIKE CONCAT('%', LOWER(@carrier), '%') THEN 0.8
-          WHEN LOWER(@carrier) LIKE CONCAT('%', LOWER(carrier), '%') THEN 0.7
-          ELSE 0.5
-        END as match_score
-      FROM \`${process.env.NEXT_PUBLIC_GCP_PROJECT_ID || 'carenav-health'}.insurance_plans.plan_benefits\`
-      WHERE (
-        LOWER(carrier) LIKE CONCAT('%', LOWER(@carrier), '%') OR
-        LOWER(@carrier) LIKE CONCAT('%', LOWER(carrier), '%') OR
-        (plan_name LIKE CONCAT('%', @groupPart, '%') AND @groupPart IS NOT NULL)
-      )
-      ORDER BY match_score DESC, last_updated DESC
-      LIMIT 1
-    `;
-    
-    // Extract potential plan identifier from group number
-    const groupPart = groupNumber ? groupNumber.substring(0, 4) : null;
-    
-    const [rows] = await bigquery.query({
-      query,
-      params: { carrier, groupPart }
-    });
-    
-    return rows.length > 0 ? rows[0] : null;
-  } catch (error) {
-    console.error('BigQuery fuzzy search error:', error);
-    return null;
-  }
-}
-
-// Find any plan from the same carrier
-async function findCarrierPlan(carrier: string) {
-  try {
-    const query = `
-      SELECT *
-      FROM \`${process.env.NEXT_PUBLIC_GCP_PROJECT_ID || 'carenav-health'}.insurance_plans.plan_benefits\`
-      WHERE LOWER(carrier) LIKE CONCAT('%', LOWER(@carrier), '%')
-      ORDER BY last_updated DESC
-      LIMIT 1
-    `;
-    
-    const [rows] = await bigquery.query({
-      query,
-      params: { carrier }
-    });
-    
-    return rows.length > 0 ? rows[0] : null;
-  } catch (error) {
-    console.error('Find carrier plan error:', error);
-    return null;
-  }
-}
-
-// Adjust existing plan using OpenAI
-async function adjustPlanWithOpenAI(basePlan: any, groupNumber?: string, payerId?: string) {
-  const prompt = `Based on this insurance plan template and the specific identifiers, adjust the benefits:
-
-Base Plan: ${basePlan.carrier} ${basePlan.plan_type}
-Current Deductible: $${basePlan.deductible_individual}
-Current Copays: PCP $${basePlan.pcp_copay}, Specialist $${basePlan.specialist_copay}, ER $${basePlan.er_copay}
-
-Specific Identifiers:
-- Group Number: ${groupNumber || 'Unknown'}
-- Payer ID: ${payerId || 'Unknown'}
-
-Common patterns:
-- Group numbers starting with low digits (1-3) often indicate richer benefits
-- "GOLD", "SILVER", "BRONZE" in identifiers indicate ACA metal tiers
-- "HSA" or "HDHP" indicate high-deductible plans
-- Corporate group numbers often have better benefits than individual plans
-
-Return ONLY a JSON object with adjusted values:
-{
-  "deductible_individual": number,
-  "oop_max_individual": number,
-  "pcp_copay": number or null (null if deductible applies),
-  "specialist_copay": number or null,
-  "urgent_care_copay": number or null,
-  "er_copay": number,
-  "confidence_note": "Brief explanation of adjustments"
-}`;
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
-      messages: [{ role: 'user', content: prompt }],
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-    });
-    
-    const adjustments = JSON.parse(response.choices[0].message.content!);
-    
-    return {
-      ...formatBigQueryPlan(basePlan),
-      deductible: adjustments.deductible_individual,
-      oopMax: adjustments.oop_max_individual,
-      copays: {
-        primaryCare: adjustments.pcp_copay,
-        specialist: adjustments.specialist_copay,
-        urgentCare: adjustments.urgent_care_copay,
-        emergency: adjustments.er_copay,
-        generic: basePlan.rx_tier1_copay || 10
-      },
-      adjustmentNote: adjustments.confidence_note
-    };
-  } catch (error) {
-    console.error('OpenAI adjustment error:', error);
-    return formatBigQueryPlan(basePlan);
-  }
-}
-
-// Generate complete plan using OpenAI
-async function generatePlanWithOpenAI(carrier: string, groupNumber?: string, payerId?: string) {
-  const prompt = `Generate realistic health insurance plan details based on these identifiers:
-
-Carrier: ${carrier}
-Group Number: ${groupNumber || 'Not provided'}
-Payer ID: ${payerId || 'Not provided'}
-
-Consider:
-- ${carrier} typical plan structures and naming conventions
-- Group number patterns (low numbers = richer benefits, high numbers = basic plans)
-- Common employer vs individual plan differences
-- Regional variations (if identifiable)
-- 2024-2025 market trends
-
-Return a JSON object with:
-{
-  "plan_name": "Realistic plan name based on carrier and identifiers",
-  "plan_type": "HMO/PPO/EPO/POS",
-  "deductible_individual": number,
-  "deductible_family": number (2x individual),
-  "oop_max_individual": number,
-  "oop_max_family": number (2x individual),
-  "pcp_copay": number or null,
-  "specialist_copay": number or null,
-  "urgent_care_copay": number,
-  "er_copay": number,
-  "rx_tier1_copay": number (generic drugs),
-  "referral_required": boolean,
-  "out_of_network_covered": boolean,
-  "confidence_note": "Brief explanation of how you determined these values"
-}`;
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
-      messages: [{ role: 'user', content: prompt }],
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-    });
-    
-    const generatedPlan = JSON.parse(response.choices[0].message.content!);
-    
-    return {
-      id: `ai-generated-${Date.now()}`,
-      name: generatedPlan.plan_name,
-      carrier: carrier,
-      type: generatedPlan.plan_type,
-      summary: `${carrier} ${generatedPlan.plan_type} plan (AI estimated)`,
-      deductible: generatedPlan.deductible_individual,
-      deductibleFamily: generatedPlan.deductible_family,
-      oopMax: generatedPlan.oop_max_individual,
-      oopMaxFamily: generatedPlan.oop_max_family,
-      copays: {
-        primaryCare: generatedPlan.pcp_copay,
-        specialist: generatedPlan.specialist_copay,
-        urgentCare: generatedPlan.urgent_care_copay,
-        emergency: generatedPlan.er_copay,
-        generic: generatedPlan.rx_tier1_copay
-      },
-      features: {
-        referralRequired: generatedPlan.referral_required,
-        outOfNetworkCovered: generatedPlan.out_of_network_covered,
-        groupNumber: groupNumber,
-        payerId: payerId
-      },
-      aiNote: generatedPlan.confidence_note
-    };
-  } catch (error) {
-    console.error('OpenAI generation error:', error);
-    // Last resort fallback
-    return {
-      id: 'fallback-plan',
-      name: `${carrier} Standard Plan`,
-      carrier: carrier,
-      type: 'PPO',
-      summary: `${carrier} estimated plan`,
-      deductible: 3000,
-      oopMax: 7500,
-      copays: {
-        primaryCare: 30,
-        specialist: 60,
-        urgentCare: 75,
-        emergency: 350,
-        generic: 15
-      }
-    };
-  }
-}
-
-// Format BigQuery plan data
-function formatBigQueryPlan(plan: any) {
-  return {
-    id: plan.plan_id,
-    name: plan.plan_name,
-    carrier: plan.carrier,
-    type: plan.plan_type,
-    summary: `${plan.carrier} ${plan.plan_type} - ${plan.plan_name}`,
-    deductible: plan.deductible_individual || 0,
-    deductibleFamily: plan.deductible_family || (plan.deductible_individual * 2),
-    oopMax: plan.oop_max_individual || 0,
-    oopMaxFamily: plan.oop_max_family || (plan.oop_max_individual * 2),
-    copays: {
-      primaryCare: plan.pcp_copay,
-      specialist: plan.specialist_copay,
-      urgentCare: plan.urgent_care_copay,
-      emergency: plan.er_copay,
-      generic: plan.rx_tier1_copay,
-      brand: plan.rx_tier2_copay
-    },
-    features: {
-      referralRequired: plan.referral_required || false,
-      outOfNetworkCovered: plan.out_of_network_covered || false,
-      groupNumber: plan.group_number,
-      payerId: plan.payer_id
-    }
-  };
 }
