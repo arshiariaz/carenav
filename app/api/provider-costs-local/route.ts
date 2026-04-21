@@ -1,439 +1,224 @@
 // app/api/provider-costs-local/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { getBundleForSymptom, calculateBundleCost } from '@/lib/procedure-bundles';
-import { ProviderSearchService } from '@/lib/provider-search-service';
-import { 
-  CMSPriceLookup, 
-  MedicationService, 
-  DistanceService, 
-  HRSAService,
-  FinancialAssistanceService,
-  type DistanceResult 
-} from '@/lib/healthcare-apis';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 
-// Define the enriched provider type
-interface EnrichedProvider {
-  name: string;
-  type: string;
-  address: string;
-  phone: string;
-  npi: string;
-  specialty: string;
-  distance: number;
-  driveTime: number;
-  distanceText?: string;
-  durationText?: string;
-  waitTime: string;
-  acceptsWalkIns: boolean;
-  hasPharmacy: boolean;
-  hours: string;
-  zip: string;
-  bundleName: string;
-  totalCost: number;
-  estimatedPatientCost: number;
-  insurancePays: number;
-  costBreakdown: any[];
-  costNote: string;
-  priceLevel?: string;
-  negotiatedRate: number;
-  dataSource: string;
-  usingRealPricing: boolean;
-  [key: string]: any;
+let procedureStats: Record<string, {
+  description: string; national_mean: number; state_mean_tx: number;
+  cross_state_mean: number; cross_state_stddev: number; n_states: number;
+}> | null = null;
+
+function loadProcedureStats() {
+  if (procedureStats) return procedureStats;
+  // Check all likely locations — original only checked data/ which doesn't exist
+  const candidates = [
+    join(process.cwd(), 'data', 'cms_procedure_stats.json'),
+    join(process.cwd(), 'cms_procedure_stats.json'),
+    join(process.cwd(), 'public', 'cms_procedure_stats.json'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      procedureStats = JSON.parse(readFileSync(p, 'utf-8'));
+      console.log(`✅ Loaded ${Object.keys(procedureStats!).length} CPT codes from ${p}`);
+      return procedureStats;
+    }
+  }
+  console.warn('⚠️  cms_procedure_stats.json not found — using hardcoded CMS TX rates');
+  return null;
 }
 
-// Provider-specific price multipliers
-const PROVIDER_MULTIPLIERS: Record<string, number> = {
-  'CVS MinuteClinic': 0.85,
-  'Walgreens Healthcare Clinic': 0.90,
-  'CityMD Urgent Care': 1.10,
-  'MedExpress': 1.05,
-  'NextCare': 1.00,
-  'Houston Methodist Emergency Room': 1.25,
-  'Memorial Hermann ER': 1.15,
-  'Ben Taub Hospital Emergency': 0.60,
-  'Houston Methodist Primary Care': 1.10,
-  'Community Health Center': 0.50,
+const CMS_TX_RATES: Record<string, number> = {
+  '99213': 83.74, '99214': 117.17, '99283': 68.97, '99284': 115.44,
+  '87880': 16.07, '87804': 16.11, '81001': 3.10,  '71046': 23.08,
+  '71045': 18.50, '93010': 7.91,  '73610': 29.98, '97110': 23.21,
+  '99395': 174.00,
 };
+
+function getCmsRate(cptCode: string): number {
+  return CMS_TX_RATES[cptCode] ?? 100;
+}
+
+const PROVIDER_TYPE_CONFIG: Record<string, { textQuery: string; label: string; costMultiplier: number; }> = {
+  emergency:  { textQuery: 'emergency room hospital',            label: 'Emergency Room', costMultiplier: 3.5 },
+  urgent_care:{ textQuery: 'urgent care clinic',                 label: 'Urgent Care',    costMultiplier: 1.2 },
+  primary:    { textQuery: 'primary care doctor family medicine', label: 'Primary Care',   costMultiplier: 1.0 },
+};
+
+async function searchGooglePlaces(
+  query: string, lat: number, lng: number, cityHint: string,
+  radiusMeters = 16000, maxResults = 15
+): Promise<{ places: any[]; error?: string }> {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+
+  // Surface missing key as actionable error rather than silent empty array
+  if (!apiKey) {
+    console.error('❌ GOOGLE_PLACES_API_KEY not set in .env.local');
+    return {
+      places: [],
+      error: 'Provider search is unavailable: GOOGLE_PLACES_API_KEY is missing from .env.local. ' +
+             'Add it and ensure "Places API (New)" is enabled in Google Cloud Console.',
+    };
+  }
+
+  // Strip "Your area" — meaningless to Google; locationBias handles proximity
+  const cleanHint = cityHint.replace(/your area/gi, '').trim() || 'nearby';
+
+  const body = {
+    textQuery: `${query} near ${cleanHint}`,
+    locationBias: { circle: { center: { latitude: lat, longitude: lng }, radius: radiusMeters } },
+    maxResultCount: maxResults,
+  };
+
+  try {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.internationalPhoneNumber,places.regularOpeningHours,places.location,places.types,places.id',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Google Places error:', res.status, errText);
+      let msg = `Google Places API error ${res.status}.`;
+      try {
+        const parsed = JSON.parse(errText);
+        const status = parsed?.error?.status;
+        if (status === 'REQUEST_DENIED')    msg = 'Google Places API key is invalid or "Places API (New)" is not enabled in Google Cloud Console.';
+        else if (status === 'OVER_QUERY_LIMIT') msg = 'Google Places quota exceeded for today.';
+        else if (parsed?.error?.message)   msg = parsed.error.message;
+      } catch {}
+      return { places: [], error: msg };
+    }
+
+    const data = await res.json();
+    return { places: data.places || [] };
+  } catch (err) {
+    console.error('Google Places fetch error:', err);
+    return { places: [], error: 'Network error contacting Google Places API.' };
+  }
+}
+
+function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function formatHours(h: any): string {
+  if (!h?.weekdayDescriptions?.length) return 'Call for hours';
+  const d = h.weekdayDescriptions[0];
+  if (d.toLowerCase().includes('open 24')) return 'Open 24 hours';
+  return d.replace(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*/, '');
+}
+
+function parseCopay(val: any, fallback: number): number {
+  if (typeof val === 'number' && !isNaN(val)) return val;
+  if (typeof val === 'string') { const n = parseFloat(val.replace(/[^0-9.]/g, '')); if (!isNaN(n) && n > 0) return n; }
+  return fallback;
+}
 
 export async function POST(request: NextRequest) {
   try {
-    const { planId, symptom, cptCodes, urgency, city, state, zip } = await request.json();
-    
-    console.log('🔍 Provider search request:', { planId, symptom, cptCodes, urgency, city, state, zip });
-    
-    // Get the procedure bundle
-    const bundle = getBundleForSymptom(symptom || 'office visit');
-    
-    if (!bundle) {
-      console.log('⚠️ No bundle found for symptom:', symptom);
-      const defaultBundle = {
-        name: 'Office Visit',
-        description: 'Standard office visit',
-        components: [
-          { code: '99213', description: 'Office visit', category: 'physician' as const, typical_cost: 125, required: true }
-        ]
+    const { symptom, cptCodes, urgency, city, state, lat: reqLat, lng: reqLng, matchedPlan } = await request.json();
+    console.log('🔍 Provider search:', { symptom, urgency, city, state, cptCodes });
+
+    const providerType = urgency === 'emergency' ? 'emergency' : 'urgent_care';
+    const config = PROVIDER_TYPE_CONFIG[providerType];
+
+    // lat/lng are the real GPS coordinates from the browser — always use them as primary
+    const lat = (typeof reqLat === 'number' && !isNaN(reqLat) && reqLat !== 0) ? reqLat : 29.7604;
+    const lng = (typeof reqLng === 'number' && !isNaN(reqLng) && reqLng !== 0) ? reqLng : -95.3698;
+    const cityHint = [city, state].filter(s => s && !/your area/i.test(s)).join(' ') || 'Houston TX';
+
+    console.log(`📍 GPS: ${lat.toFixed(4)}, ${lng.toFixed(4)} | hint: "${cityHint}"`);
+
+    const { places, error: placesError } = await searchGooglePlaces(config.textQuery, lat, lng, cityHint, 16000, 15);
+    console.log(`  Google returned ${places.length} places`);
+
+    // Return actionable error to UI instead of silent empty list
+    if (places.length === 0 && placesError) {
+      return NextResponse.json({ success: false, providers: [], error: placesError });
+    }
+
+    const plan = {
+      copayUrgent:  parseCopay(matchedPlan?.copays?.urgentCare,  75),
+      copayER:      parseCopay(matchedPlan?.copays?.emergency,  350),
+      copayPrimary: parseCopay(matchedPlan?.copays?.primaryCare, 30),
+      deductible:   parseCopay(matchedPlan?.deductible,        1500),
+    };
+
+    const stats = loadProcedureStats();
+    const bundleMeanBase = (cptCodes ?? ['99213']).reduce((sum: number, code: string) => {
+      const s = stats?.[code]; return sum + (s?.state_mean_tx ?? getCmsRate(code));
+    }, 0);
+    const bundleMeanTotal  = Math.round(bundleMeanBase * config.costMultiplier);
+    const bundleStddev     = Math.sqrt((cptCodes ?? ['99213']).reduce((sum: number, code: string) => {
+      const s = stats?.[code]; return sum + Math.pow(s?.cross_state_stddev ?? 5, 2);
+    }, 0)) * config.costMultiplier;
+
+    const providers = places.map((place: any) => {
+      const pLat = place.location?.latitude ?? lat;
+      const pLng = place.location?.longitude ?? lng;
+      const distance = haversineDistance(lat, lng, pLat, pLng);
+
+      const name = (place.displayName?.text ?? '').toLowerCase();
+      const isER = name.includes('emergency') || / er$| er /.test(name);
+      const displayType   = isER ? 'Emergency Room' : config.label;
+      const effectiveType = isER ? 'emergency'      : providerType;
+      const mult = PROVIDER_TYPE_CONFIG[effectiveType].costMultiplier;
+
+      const totalCms = (cptCodes ?? ['99213']).reduce((s: number, c: string) => s + getCmsRate(c), 0);
+      const negotiatedRate = Math.round(totalCms * mult);
+      const patientCost = effectiveType === 'emergency'
+        ? (plan.copayER   || Math.round(negotiatedRate * 0.2))
+        : (plan.copayUrgent || Math.round(negotiatedRate * 0.2));
+
+      // Deterministic per-provider variation — no random noise on refresh
+      const hash = (place.displayName?.text ?? '').split('').reduce((h: number, c: string) => (h*31+c.charCodeAt(0))&0xffff, 0);
+      const variation = 0.88 + (hash % 100) / 370;
+      const adjNegotiated = Math.round(negotiatedRate * variation);
+      const adjInsurance  = Math.max(0, adjNegotiated - patientCost);
+
+      const z    = bundleStddev > 0 ? (adjNegotiated - bundleMeanTotal) / bundleStddev : 0;
+      const pct  = bundleMeanTotal > 0 ? Math.round(((adjNegotiated - bundleMeanTotal) / bundleMeanTotal) * 100) : 0;
+      const label = z < -1.5 ? 'great value' : z < -0.5 ? 'below average' : z > 1.5 ? 'high cost' : z > 0.5 ? 'above average' : 'average';
+
+      return {
+        name:                 place.displayName?.text ?? 'Unknown',
+        type:                 displayType,
+        address:              place.formattedAddress ?? '',
+        phone:                place.internationalPhoneNumber ?? '',
+        distance:             parseFloat(distance.toFixed(1)),
+        driveTime:            Math.round(distance * 3 + 5),
+        waitTime:             effectiveType === 'emergency' ? '30-60 min' : '15-45 min',
+        hours:                formatHours(place.regularOpeningHours),
+        rating:               place.rating ?? undefined,
+        ratingCount:          place.userRatingCount ?? 0,
+        estimatedPatientCost: patientCost,
+        negotiatedRate:       adjNegotiated,
+        insurancePays:        adjInsurance,
+        networkStatus:        'In-Network',
+        dataSource:           'Google Places + CMS Medicare Rates',
+        anomalyScore:         parseFloat(z.toFixed(2)),
+        priceLabel:           label,
+        pctVsRegion:          pct,
+        regionalMean:         bundleMeanTotal,
       };
-      
-      return processProviderSearch({
-        bundle: defaultBundle,
-        planId,
-        cptCodes: cptCodes || ['99213'],
-        urgency,
-        city,
-        state,
-        zip,
-        symptom
-      });
-    }
-    
-    return processProviderSearch({
-      bundle,
-      planId,
-      cptCodes: cptCodes || bundle.components.map(c => c.code),
-      urgency,
-      city,
-      state,
-      zip,
-      symptom
     });
-    
+
+    providers.sort((a: any, b: any) => a.distance - b.distance);
+    console.log(`📤 Returning ${providers.length} providers`);
+
+    return NextResponse.json({ success: true, providers, stats: { count: providers.length } });
+
   } catch (error) {
-    console.error('❌ Provider costs error:', error);
-    
-    return NextResponse.json({
-      success: false,
-      providers: [],
-      stats: { min: 100, max: 500, avg: 250, count: 0 },
-      message: 'Unable to load provider costs',
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 });
+    console.error('❌ Provider search error:', error);
+    return NextResponse.json({ success: false, providers: [], error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
   }
-}
-
-async function processProviderSearch(params: {
-  bundle: any;
-  planId: string;
-  cptCodes: string[];
-  urgency?: string;
-  city?: string;
-  state?: string;
-  zip?: string;
-  symptom?: string;
-}) {
-  const { bundle, planId, cptCodes, urgency, city = 'Houston', state = 'TX', zip = '77001', symptom } = params;
-  
-  // Determine provider type
-  let providerType = 'urgent_care';
-  if (bundle.name.includes('ER') || urgency === 'emergency') {
-    providerType = 'emergency';
-  } else if (bundle.name.includes('Primary') || bundle.name.includes('Annual')) {
-    providerType = 'primary';
-  }
-  
-  let providers: any[] = [];
-  
-  try {
-    console.log(`🏥 Searching for ${providerType} providers in ${city}, ${state} ${zip}...`);
-    
-    // Search for providers
-    const searchResults = await ProviderSearchService.findMedicalFacilities({
-      city,
-      state,
-      zip
-    });
-    
-    // Select providers based on type
-    if (providerType === 'urgent_care') {
-      providers = searchResults.urgentCare;
-    } else if (providerType === 'emergency') {
-      providers = searchResults.emergency;
-    } else {
-      providers = searchResults.primaryCare;
-    }
-    
-    // If we didn't find enough, include some general clinics
-    if (providers.length < 5 && searchResults.all.length > providers.length) {
-      const additional = searchResults.all
-        .filter(p => !providers.some(existing => existing.number === p.number))
-        .slice(0, 10 - providers.length);
-      providers.push(...additional);
-    }
-    
-    console.log(`✅ Found ${providers.length} ${providerType} providers`);
-    
-  } catch (error) {
-    console.error('❌ Provider search failed:', error);
-  }
-  
-  // If no providers found, use fallback data
-  if (providers.length === 0) {
-    console.log('⚠️ No providers found, using fallback data');
-    providers = getFallbackProviders(city, state, providerType);
-  }
-  
-  // Format and enrich providers
-  const formattedProviders = await formatAndEnrichProviders(
-    providers, 
-    { city, state, zip }, 
-    bundle, 
-    planId, 
-    cptCodes,
-    providerType
-  );
-  
-  // Add HRSA health centers if cost is high
-  const estimatedCost = bundle.components.reduce((sum: number, c: any) => sum + c.typical_cost, 0);
-  if (estimatedCost > 200 && formattedProviders.length < 10) {
-    try {
-      console.log('💰 High cost detected, adding HRSA health centers...');
-      const healthCenters = await HRSAService.findHealthCenters(zip, 25);
-      
-      for (const center of healthCenters.slice(0, 3)) {
-        const fqhcProvider: EnrichedProvider = {
-          name: center.name || 'Community Health Center',
-          type: 'Community Health Center',
-          address: center.address || `${city}, ${state} ${zip}`,
-          phone: center.phone || '1-877-464-4772',
-          npi: 'FQHC-' + Math.random().toString(36).substr(2, 9),
-          specialty: 'Federally Qualified Health Center',
-          distance: Math.random() * 10,
-          driveTime: Math.round(Math.random() * 30 + 10),
-          waitTime: 'Same day appointments',
-          acceptsWalkIns: true,
-          hasPharmacy: true,
-          hours: center.hours || 'Mon-Fri 8am-5pm, Sat 9am-1pm',
-          zip: zip,
-          bundleName: bundle.name,
-          totalCost: 40,
-          estimatedPatientCost: 40,
-          insurancePays: 0,
-          costBreakdown: [{
-            category: 'Sliding Scale Fee',
-            items: [{
-              description: 'Income-based payment',
-              cost: 40,
-              patientPays: 40
-            }]
-          }],
-          costNote: 'Sliding scale based on income',
-          priceLevel: 'low',
-          negotiatedRate: 40,
-          dataSource: 'HRSA FQHC Program',
-          usingRealPricing: true
-        };
-        formattedProviders.push(fqhcProvider);
-      }
-    } catch (error) {
-      console.error('HRSA API error:', error);
-    }
-  }
-  
-  // Calculate statistics
-  const patientCosts = formattedProviders.map((p: any) => p.estimatedPatientCost);
-  const stats = patientCosts.length > 0 ? {
-    min: Math.min(...patientCosts),
-    max: Math.max(...patientCosts),
-    avg: Math.round(patientCosts.reduce((a: number, b: number) => a + b, 0) / patientCosts.length),
-    count: formattedProviders.length,
-    bundleUsed: bundle.name,
-    dataSource: 'NPI Registry + Estimated Costs'
-  } : {
-    min: 0,
-    max: 0,
-    avg: 0,
-    count: 0,
-    bundleUsed: bundle.name,
-    dataSource: 'No data'
-  };
-  
-  // Get financial assistance if costs are high
-  let financialAssistance = null;
-  if (stats.avg > 200) {
-    try {
-      financialAssistance = await FinancialAssistanceService.findPrograms(zip);
-    } catch (error) {
-      console.error('Financial assistance lookup failed:', error);
-    }
-  }
-  
-  console.log(`📤 Sending response with ${formattedProviders.length} providers`);
-  
-  return NextResponse.json({
-    success: true,
-    symptom: bundle.name,
-    bundle: {
-      name: bundle.name,
-      description: bundle.description,
-      totalComponents: bundle.components.length
-    },
-    providers: formattedProviders, // THIS IS THE KEY LINE - MAKE SURE PROVIDERS ARE INCLUDED
-    stats,
-    planInfo: {
-      isHSA: planId?.toLowerCase().includes('hsa'),
-      deductible: planId?.toLowerCase().includes('hsa') ? 2800 : 1500,
-      deductibleMet: 0,
-      message: planId?.toLowerCase().includes('hsa') ? 
-        'With your HSA plan, you pay the full negotiated rate until you meet your deductible.' :
-        'Your plan includes copays for office visits and coinsurance for other services.'
-    },
-    usingNPIProviders: true,
-    location: { city, state, zip },
-    financialAssistance
-  });
-}
-
-async function formatAndEnrichProviders(
-  providers: any[], 
-  location: { city: string; state: string; zip: string },
-  bundle: any,
-  planId: string,
-  cptCodes: string[],
-  providerType: string
-): Promise<EnrichedProvider[]> {
-  const { city, state, zip } = location;
-  const isHSA = planId?.toLowerCase().includes('hsa');
-  
-  // Get pricing data
-  const cmsPrices = await CMSPriceLookup.getMedicarePrices(cptCodes);
-  
-  // Format providers
-  const formattedProviders: EnrichedProvider[] = [];
-  
-  for (const provider of providers) {
-    const formatted = ProviderSearchService.formatProvider(provider, providerType);
-    if (!formatted) continue;
-    
-    // Calculate costs
-    const multiplier = PROVIDER_MULTIPLIERS[formatted.name] || 1.0;
-    const bundleCopy = JSON.parse(JSON.stringify(bundle));
-    
-    bundleCopy.components.forEach((component: any) => {
-      const cmsRate = cmsPrices.get(component.code);
-      if (cmsRate) {
-        component.typical_cost = Math.round(cmsRate * multiplier);
-      } else {
-        component.typical_cost = Math.round(component.typical_cost * multiplier);
-      }
-    });
-    
-    const mockPlan = {
-      id: planId,
-      isHSA,
-      deductible: isHSA ? 2800 : 1500,
-      deductibleMet: 0,
-      copays: {
-        urgentCare: isHSA ? 0 : 75,
-        emergency: isHSA ? 0 : 350,
-        primaryCare: isHSA ? 0 : 30
-      }
-    };
-    
-    const costDetails = calculateBundleCost(bundleCopy, mockPlan);
-    
-    const enrichedProvider: EnrichedProvider = {
-      name: formatted.name,
-      type: formatted.type,
-      address: formatted.address,
-      phone: formatted.phone,
-      npi: formatted.npi,
-      specialty: formatted.specialty,
-      distance: formatted.distance || Math.round(Math.random() * 10 * 10) / 10,
-      driveTime: formatted.driveTime || Math.round(Math.random() * 30 + 10),
-      waitTime: formatted.waitTime,
-      acceptsWalkIns: formatted.acceptsWalkIns,
-      hasPharmacy: formatted.hasPharmacy,
-      hours: formatted.hours,
-      zip: formatted.zip,
-      bundleName: bundle.name,
-      totalCost: costDetails.totalCost,
-      estimatedPatientCost: costDetails.patientCost,
-      insurancePays: costDetails.insurancePays,
-      costBreakdown: costDetails.breakdown,
-      costNote: isHSA ? 
-        'You pay full cost (counts toward $2,800 deductible)' : 
-        'After insurance',
-      priceLevel: multiplier < 0.9 ? 'low' : multiplier > 1.1 ? 'high' : 'average',
-      negotiatedRate: costDetails.totalCost,
-      dataSource: cmsPrices.size > 0 ? 'CMS Medicare Data' : 'Estimated',
-      usingRealPricing: cmsPrices.size > 0
-    };
-    
-    formattedProviders.push(enrichedProvider);
-  }
-  
-  // Sort by distance
-  formattedProviders.sort((a, b) => a.distance - b.distance);
-  
-  return formattedProviders;
-}
-
-// Fallback provider data
-function getFallbackProviders(city: string, state: string, type: string): any[] {
-  const providers = [];
-  
-  if (type === 'urgent_care' || type === 'all') {
-    providers.push({
-      basic: {
-        organization_name: `${city} Urgent Care Center`
-      },
-      addresses: [{
-        address_purpose: 'LOCATION',
-        address_1: '123 Main St',
-        city: city,
-        state: state,
-        postal_code: '77001',
-        telephone_number: '(713) 555-0100'
-      }],
-      taxonomies: [{
-        desc: 'Urgent Care',
-        primary: true
-      }],
-      number: 'FALLBACK-UC-001'
-    });
-  }
-  
-  if (type === 'emergency' || type === 'all') {
-    providers.push({
-      basic: {
-        organization_name: `${city} Medical Center Emergency`
-      },
-      addresses: [{
-        address_purpose: 'LOCATION',
-        address_1: '456 Hospital Dr',
-        city: city,
-        state: state,
-        postal_code: '77002',
-        telephone_number: '(713) 555-0911'
-      }],
-      taxonomies: [{
-        desc: 'Emergency Medicine',
-        primary: true
-      }],
-      number: 'FALLBACK-ER-001'
-    });
-  }
-  
-  if (type === 'primary' || type === 'all') {
-    providers.push({
-      basic: {
-        organization_name: `${city} Family Practice`
-      },
-      addresses: [{
-        address_purpose: 'LOCATION',
-        address_1: '789 Health Blvd',
-        city: city,
-        state: state,
-        postal_code: '77003',
-        telephone_number: '(713) 555-0200'
-      }],
-      taxonomies: [{
-        desc: 'Family Medicine',
-        primary: true
-      }],
-      number: 'FALLBACK-PC-001'
-    });
-  }
-  
-  console.log(`📋 Using ${providers.length} fallback providers`);
-  return providers;
 }
