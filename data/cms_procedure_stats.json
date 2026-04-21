@@ -1,0 +1,98 @@
+{
+  "99213": {
+    "description": "Established patient office or other outpatient visit, 20-29 ",
+    "national_mean": 85.51,
+    "state_mean_tx": 83.47,
+    "cross_state_mean": 83.47,
+    "cross_state_stddev": 6.83,
+    "n_states": 29
+  },
+  "99214": {
+    "description": "Established patient office or other outpatient visit, 30-39 ",
+    "national_mean": 120.16,
+    "state_mean_tx": 117.17,
+    "cross_state_mean": 117.17,
+    "cross_state_stddev": 10.32,
+    "n_states": 29
+  },
+  "99283": {
+    "description": "Emergency department visit with low level of medical decisio",
+    "national_mean": 69.79,
+    "state_mean_tx": 68.97,
+    "cross_state_mean": 68.97,
+    "cross_state_stddev": 2.99,
+    "n_states": 6
+  },
+  "99284": {
+    "description": "Emergency department visit with moderate level of medical de",
+    "national_mean": 118.05,
+    "state_mean_tx": 115.44,
+    "cross_state_mean": 115.44,
+    "cross_state_stddev": 5.59,
+    "n_states": 14
+  },
+  "87880": {
+    "description": "Detection test by immunoassay with direct visual observation",
+    "national_mean": 16.04,
+    "state_mean_tx": 16.07,
+    "cross_state_mean": 16.02,
+    "cross_state_stddev": 0.11,
+    "n_states": 56
+  },
+  "87804": {
+    "description": "Detection test by immunoassay with direct visual observation",
+    "national_mean": 16.09,
+    "state_mean_tx": 16.11,
+    "cross_state_mean": 16.09,
+    "cross_state_stddev": 0.09,
+    "n_states": 56
+  },
+  "81001": {
+    "description": "Manual urinalysis test with examination using microscope, au",
+    "national_mean": 3.1,
+    "state_mean_tx": 3.1,
+    "cross_state_mean": 3.1,
+    "cross_state_stddev": 0.01,
+    "n_states": 53
+  },
+  "71046": {
+    "description": "X-ray of chest, 2 views",
+    "national_mean": 23.84,
+    "state_mean_tx": 23.08,
+    "cross_state_mean": 23.08,
+    "cross_state_stddev": 3.72,
+    "n_states": 29
+  },
+  "93010": {
+    "description": "Routine electrocardiogram (ecg) using at least 12 leads with",
+    "national_mean": 7.96,
+    "state_mean_tx": 7.91,
+    "cross_state_mean": 7.91,
+    "cross_state_stddev": 0.36,
+    "n_states": 29
+  },
+  "73610": {
+    "description": "X-ray of ankle, minimum of 3 views",
+    "national_mean": 30.88,
+    "state_mean_tx": 29.98,
+    "cross_state_mean": 29.98,
+    "cross_state_stddev": 3.74,
+    "n_states": 29
+  },
+  "97110": {
+    "description": "Therapy procedure using exercise to develop strength, endura",
+    "national_mean": 23.4,
+    "state_mean_tx": 23.21,
+    "cross_state_mean": 23.21,
+    "cross_state_stddev": 1.72,
+    "n_states": 40
+  },
+  "99395": {
+    "description": "Periodic preventive medicine, established patient 18-39",
+    "national_mean": 174.0,
+    "state_mean_tx": 171.5,
+    "cross_state_mean": 174.0,
+    "cross_state_stddev": 12.4,
+    "n_states": 51
+  }
+}
